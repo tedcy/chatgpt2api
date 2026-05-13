@@ -2,7 +2,7 @@
   "auth-key": "chatgpt2api",
   "refresh_account_interval_minute": 60,
   "image_retention_days": 15,
-  "image_poll_timeout_secs": 120,
+  "image_poll_timeout_secs": 150,
   "auto_remove_rate_limited_accounts": false,
   "auto_remove_invalid_accounts": true,
   "log_levels": [
@@ -46,5 +46,5 @@
       "images": false
     }
   },
-  "image_account_concurrency": 3
+  "image_account_concurrency": 1
 }

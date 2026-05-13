@@ -5,6 +5,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from threading import Condition, Lock
+from time import monotonic
 from typing import Any
 
 from services.config import config
@@ -17,6 +18,11 @@ from utils.helper import anonymize_token
 
 
 EXPORT_TIMEZONE = timezone(timedelta(hours=8))
+STATUS_DISABLED = "\u7981\u7528"
+STATUS_RATE_LIMITED = "\u9650\u6d41"
+STATUS_ERROR = "\u5f02\u5e38"
+STATUS_NORMAL = "\u6b63\u5e38"
+IMAGE_RATE_LIMIT_COOLDOWN_SECONDS = 30
 
 
 def _clean_string(value: Any) -> str:
@@ -73,10 +79,38 @@ class AccountService:
         self.storage.save_accounts(list(self._accounts.values()))
 
     @staticmethod
-    def _is_image_account_available(account: dict) -> bool:
+    def _parse_restore_at(value: object) -> datetime | None:
+        if not value:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @classmethod
+    def _limit_until_expired(cls, value: object) -> bool:
+        limit_until = cls._parse_restore_at(value)
+        return bool(limit_until and limit_until <= datetime.now(timezone.utc))
+
+    @classmethod
+    def _image_limit_until(cls, account: dict) -> object:
+        return account.get("image_cooldown_until") or account.get("restore_at")
+
+    @classmethod
+    def _is_image_account_available(cls, account: dict) -> bool:
         if not isinstance(account, dict):
             return False
-        if account.get("status") in {"禁用", "限流", "异常"}:
+        status = account.get("status")
+        if status == STATUS_RATE_LIMITED:
+            if not cls._limit_until_expired(cls._image_limit_until(account)):
+                return False
+        elif status in {STATUS_DISABLED, STATUS_ERROR}:
             return False
         if bool(account.get("image_quota_unknown")):
             return True
@@ -100,6 +134,7 @@ class AccountService:
         normalized["limits_progress"] = limits_progress if isinstance(limits_progress, list) else []
         normalized["default_model_slug"] = normalized.get("default_model_slug") or None
         normalized["restore_at"] = normalized.get("restore_at") or None
+        normalized["image_cooldown_until"] = normalized.get("image_cooldown_until") or None
         normalized["success"] = int(normalized.get("success") or 0)
         normalized["fail"] = int(normalized.get("fail") or 0)
         normalized["last_used_at"] = normalized.get("last_used_at")
@@ -127,10 +162,24 @@ class AccountService:
             if int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
 
-    def _acquire_next_candidate_token(self, excluded_tokens: set[str] | None = None) -> str:
+    @staticmethod
+    def _image_acquire_timeout_secs() -> float:
+        try:
+            return max(1.0, float(config.image_poll_timeout_secs or 300))
+        except (TypeError, ValueError):
+            return 300.0
+
+    def image_acquire_timeout_secs(self) -> float:
+        return self._image_acquire_timeout_secs()
+
+    def _acquire_next_candidate_token(
+        self,
+        excluded_tokens: set[str] | None = None,
+        deadline: float | None = None,
+    ) -> str:
         with self._image_slot_condition:
             while True:
-                if not self._list_ready_candidate_tokens(excluded_tokens):
+                if deadline is not None and deadline - monotonic() <= 0:
                     raise RuntimeError("no available image quota")
                 tokens = self._list_available_candidate_tokens(excluded_tokens)
                 if tokens:
@@ -138,7 +187,11 @@ class AccountService:
                     self._index += 1
                     self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
                     return access_token
-                self._image_slot_condition.wait(timeout=1.0)
+                if deadline is not None:
+                    remaining = deadline - monotonic()
+                    self._image_slot_condition.wait(timeout=min(1.0, remaining))
+                else:
+                    self._image_slot_condition.wait(timeout=1.0)
 
     def release_image_slot(self, access_token: str) -> None:
         if not access_token:
@@ -151,10 +204,12 @@ class AccountService:
                 self._image_inflight[access_token] = current_inflight - 1
             self._image_slot_condition.notify_all()
 
-    def get_available_access_token(self) -> str:
+    def get_available_access_token(self, deadline: float | None = None) -> str:
         attempted_tokens: set[str] = set()
+        if deadline is None:
+            deadline = monotonic() + self._image_acquire_timeout_secs()
         while True:
-            access_token = self._acquire_next_candidate_token(excluded_tokens=attempted_tokens)
+            access_token = self._acquire_next_candidate_token(excluded_tokens=attempted_tokens, deadline=deadline)
             attempted_tokens.add(access_token)
             try:
                 account = self.fetch_remote_info(access_token, "get_available_access_token")
@@ -224,7 +279,7 @@ class AccountService:
             return [
                 token
                 for item in self._accounts.values()
-                if item.get("status") == "限流"
+                if item.get("status") == STATUS_RATE_LIMITED
                    and (token := item.get("access_token") or "")
             ]
 
@@ -233,7 +288,7 @@ class AccountService:
         if not tokens:
             return {"added": 0, "skipped": 0, "items": self.list_accounts()}
 
-        with self._lock:
+        with self._image_slot_condition:
             added = 0
             skipped = 0
             for access_token in tokens:
@@ -256,6 +311,7 @@ class AccountService:
             items = [dict(item) for item in self._accounts.values()]
             log_service.add(LOG_TYPE_ACCOUNT, f"新增 {added} 个账号，跳过 {skipped} 个",
                             {"added": added, "skipped": skipped})
+            self._image_slot_condition.notify_all()
         return {"added": added, "skipped": skipped, "items": items}
 
     def add_account_items(self, items: list[dict[str, Any]]) -> dict:
@@ -304,7 +360,7 @@ class AccountService:
         target_set = set(token for token in tokens if token)
         if not target_set:
             return {"removed": 0, "items": self.list_accounts()}
-        with self._lock:
+        with self._image_slot_condition:
             removed = sum(self._accounts.pop(token, None) is not None for token in target_set)
             for token in target_set:
                 self._image_inflight.pop(token, None)
@@ -316,27 +372,32 @@ class AccountService:
                 self._save_accounts()
                 log_service.add(LOG_TYPE_ACCOUNT, f"删除 {removed} 个账号", {"removed": removed})
             items = [dict(item) for item in self._accounts.values()]
+            self._image_slot_condition.notify_all()
         return {"removed": removed, "items": items}
 
     def update_account(self, access_token: str, updates: dict) -> dict | None:
         if not access_token:
             return None
-        with self._lock:
+        with self._image_slot_condition:
             current = self._accounts.get(access_token)
             if current is None:
                 return None
             account = self._normalize_account({**current, **updates, "access_token": access_token})
             if account is None:
                 return None
-            if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
+            if account.get("status") != STATUS_RATE_LIMITED:
+                account["image_cooldown_until"] = None
+            if account.get("status") == STATUS_RATE_LIMITED and config.auto_remove_rate_limited_accounts:
                 self._accounts.pop(access_token, None)
                 self._save_accounts()
                 log_service.add(LOG_TYPE_ACCOUNT, "自动移除限流账号", {"token": anonymize_token(access_token)})
+                self._image_slot_condition.notify_all()
                 return None
             self._accounts[access_token] = account
             self._save_accounts()
             log_service.add(LOG_TYPE_ACCOUNT, "更新账号",
                             {"token": anonymize_token(access_token), "status": account.get("status")})
+            self._image_slot_condition.notify_all()
             return dict(account)
         return None
 
@@ -356,16 +417,17 @@ class AccountService:
                 if not image_quota_unknown:
                     next_item["quota"] = max(0, int(next_item.get("quota") or 0) - 1)
                 if not image_quota_unknown and next_item["quota"] == 0:
-                    next_item["status"] = "限流"
+                    next_item["status"] = STATUS_RATE_LIMITED
                     next_item["restore_at"] = next_item.get("restore_at") or None
-                elif next_item.get("status") == "限流":
-                    next_item["status"] = "正常"
+                elif next_item.get("status") == STATUS_RATE_LIMITED:
+                    next_item["status"] = STATUS_NORMAL
+                next_item["image_cooldown_until"] = None
             else:
                 next_item["fail"] = int(next_item.get("fail") or 0) + 1
             account = self._normalize_account(next_item)
             if account is None:
                 return None
-            if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
+            if account.get("status") == STATUS_RATE_LIMITED and config.auto_remove_rate_limited_accounts:
                 self._accounts.pop(access_token, None)
                 self._save_accounts()
                 log_service.add(LOG_TYPE_ACCOUNT, "自动移除限流账号", {"token": anonymize_token(access_token)})
@@ -374,6 +436,48 @@ class AccountService:
             self._save_accounts()
             return dict(account)
         return None
+
+    def mark_image_rate_limited(self, access_token: str, reason: str = "image_rate_limit") -> dict | None:
+        if not access_token:
+            return None
+        cooldown_until = (datetime.now(timezone.utc) + timedelta(seconds=IMAGE_RATE_LIMIT_COOLDOWN_SECONDS)).isoformat()
+        with self._image_slot_condition:
+            current_inflight = int(self._image_inflight.get(access_token, 0))
+            if current_inflight <= 1:
+                self._image_inflight.pop(access_token, None)
+            else:
+                self._image_inflight[access_token] = current_inflight - 1
+            current = self._accounts.get(access_token)
+            if current is None:
+                self._image_slot_condition.notify_all()
+                return None
+            next_item = dict(current)
+            next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            next_item["fail"] = int(next_item.get("fail") or 0) + 1
+            next_item["status"] = STATUS_RATE_LIMITED
+            next_item["image_cooldown_until"] = cooldown_until
+            account = self._normalize_account(next_item)
+            if account is None:
+                return None
+            if config.auto_remove_rate_limited_accounts:
+                self._accounts.pop(access_token, None)
+                self._save_accounts()
+                log_service.add(LOG_TYPE_ACCOUNT, "自动移除限流账号", {"token": anonymize_token(access_token)})
+                self._image_slot_condition.notify_all()
+                return None
+            self._accounts[access_token] = account
+            self._save_accounts()
+            log_service.add(
+                LOG_TYPE_ACCOUNT,
+                "图片账号触发限流冷却",
+                {
+                    "source": reason,
+                    "token": anonymize_token(access_token),
+                    "cooldown_until": account.get("image_cooldown_until"),
+                },
+            )
+            self._image_slot_condition.notify_all()
+            return dict(account)
 
     def fetch_remote_info(self, access_token: str, event: str = "fetch_remote_info") -> dict[str, Any] | None:
         if not access_token:

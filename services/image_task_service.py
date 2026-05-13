@@ -10,6 +10,7 @@ from typing import Any
 
 from services.config import DATA_DIR, config
 from services.content_filter import request_text
+from services.account_service import account_service
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
 
@@ -93,6 +94,7 @@ class ImageTaskService:
         self.retention_days_getter = retention_days_getter or (lambda: config.image_retention_days)
         self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
+        self._pending_payloads: dict[str, tuple[str, dict[str, Any], dict[str, object], str]] = {}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
             self._tasks = self._load_locked()
@@ -181,7 +183,7 @@ class ImageTaskService:
         owner = _owner_id(identity)
         key = _task_key(owner, task_id)
         now = _now_iso()
-        should_start = False
+        starts: list[tuple[str, str, dict[str, Any], dict[str, object], str]] = []
         with self._lock:
             cleaned = self._cleanup_locked()
             task = self._tasks.get(key)
@@ -200,18 +202,73 @@ class ImageTaskService:
                 "updated_at": now,
             }
             self._tasks[key] = task
+            self._pending_payloads[key] = (mode, payload, dict(identity), _clean(payload.get("model"), "gpt-image-2"))
             self._save_locked()
-            should_start = True
+            starts = self._start_queued_tasks_locked()
 
-        if should_start:
+        self._start_task_threads(starts)
+        return _public_task(task)
+
+    def _task_worker_limit(self) -> int:
+        try:
+            account_count = len(account_service.list_tokens())
+        except Exception:
+            account_count = 1
+        try:
+            per_account = max(1, int(config.image_account_concurrency or 1))
+        except Exception:
+            per_account = 1
+        return max(1, max(1, account_count) * per_account)
+
+    def _start_queued_tasks_locked(self) -> list[tuple[str, str, dict[str, Any], dict[str, object], str]]:
+        running = sum(1 for task in self._tasks.values() if task.get("status") == TASK_STATUS_RUNNING)
+        slots = max(0, self._task_worker_limit() - running)
+        if slots <= 0:
+            return []
+
+        starts: list[tuple[str, str, dict[str, Any], dict[str, object], str]] = []
+        changed = False
+        queued = [
+            (key, task)
+            for key, task in self._tasks.items()
+            if task.get("status") == TASK_STATUS_QUEUED
+        ]
+        queued.sort(key=lambda item: (_timestamp(item[1].get("created_at")), str(item[1].get("id") or "")))
+        for key, task in queued:
+            if len(starts) >= slots:
+                break
+            pending = self._pending_payloads.pop(key, None)
+            if pending is None:
+                task["status"] = TASK_STATUS_ERROR
+                task["error"] = "图片任务排队数据丢失，请重新提交"
+                task["updated_at"] = _now_iso()
+                changed = True
+                continue
+            task["status"] = TASK_STATUS_RUNNING
+            task["error"] = ""
+            task["updated_at"] = _now_iso()
+            starts.append((key, *pending))
+            changed = True
+
+        if changed:
+            self._save_locked()
+        return starts
+
+    def _start_queued_tasks(self) -> None:
+        with self._lock:
+            starts = self._start_queued_tasks_locked()
+        self._start_task_threads(starts)
+
+    def _start_task_threads(self, starts: list[tuple[str, str, dict[str, Any], dict[str, object], str]]) -> None:
+        for key, mode, payload, identity, model in starts:
+            task_id = key.rsplit(":", 1)[-1]
             thread = threading.Thread(
                 target=self._run_task,
-                args=(key, mode, payload, dict(identity), _clean(payload.get("model"), "gpt-image-2")),
+                args=(key, mode, payload, identity, model),
                 name=f"image-task-{task_id[:16]}",
                 daemon=True,
             )
             thread.start()
-        return _public_task(task)
 
     def _run_task(
         self,
@@ -259,6 +316,8 @@ class ImageTaskService:
                 status="failed",
                 error=error_message,
             )
+        finally:
+            self._start_queued_tasks()
 
     def _log_call(
         self,

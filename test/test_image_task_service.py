@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import tempfile
 import time
 import unittest
@@ -67,6 +68,48 @@ class ImageTaskServiceTests(unittest.TestCase):
             task = wait_for_task(service, OWNER, "task-1", "success")
             self.assertEqual(task["data"][0]["url"], "http://example.test/image.png")
             self.assertEqual(calls, 1)
+
+    def test_queued_tasks_obey_worker_limit(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            active = 0
+            max_active = 0
+            lock = threading.Lock()
+
+            def handler(payload):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.12)
+                with lock:
+                    active -= 1
+                return {"data": [{"url": f"http://example.test/{payload['prompt']}.png"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service._task_worker_limit = lambda: 1  # type: ignore[method-assign]
+
+            service.submit_generation(
+                OWNER,
+                client_task_id="task-1",
+                prompt="cat",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+            second = service.submit_generation(
+                OWNER,
+                client_task_id="task-2",
+                prompt="dog",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+
+            self.assertEqual(second["status"], "queued")
+            wait_for_task(service, OWNER, "task-1", "success")
+            task = wait_for_task(service, OWNER, "task-2", "success")
+            self.assertEqual(task["data"][0]["url"], "http://example.test/dog.png")
+            self.assertEqual(max_active, 1)
 
     def test_different_owner_cannot_query_task(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

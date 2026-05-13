@@ -3,7 +3,10 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Thread
+from time import monotonic, sleep
 
 os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
 
@@ -65,6 +68,56 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(updated["quota"], 0)
             self.assertEqual(updated["status"], "正常")
             self.assertTrue(updated["image_quota_unknown"])
+
+    def test_rate_limited_image_account_obeys_cooldown(self) -> None:
+        future = (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat()
+        past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+
+        self.assertFalse(
+            AccountService._is_image_account_available(
+                {"status": "\u9650\u6d41", "quota": 1, "image_cooldown_until": future}
+            )
+        )
+        self.assertTrue(
+            AccountService._is_image_account_available(
+                {"status": "\u9650\u6d41", "quota": 1, "image_cooldown_until": past}
+            )
+        )
+
+    def test_mark_image_rate_limited_releases_slot_and_sets_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account("token-1", {"status": "\u6b63\u5e38", "quota": 1})
+            service._image_inflight["token-1"] = 1
+
+            updated = service.mark_image_rate_limited("token-1", "unit_test")
+
+            self.assertIsNotNone(updated)
+            self.assertEqual(updated["status"], "\u9650\u6d41")
+            self.assertEqual(updated["fail"], 1)
+            self.assertIsNotNone(updated["image_cooldown_until"])
+            self.assertNotIn("token-1", service._image_inflight)
+            self.assertFalse(AccountService._is_image_account_available(updated))
+
+    def test_acquire_waits_until_account_becomes_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account("token-1", {"status": "\u5f02\u5e38", "quota": 1})
+            acquired: list[str] = []
+
+            def acquire() -> None:
+                acquired.append(service._acquire_next_candidate_token(deadline=monotonic() + 2))
+
+            thread = Thread(target=acquire)
+            thread.start()
+            sleep(0.05)
+            service.update_account("token-1", {"status": "\u6b63\u5e38", "quota": 1})
+            thread.join(timeout=1)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(acquired, ["token-1"])
 
 
 class TokenLogTests(unittest.TestCase):
