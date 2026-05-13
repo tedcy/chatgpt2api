@@ -15,6 +15,7 @@ from PIL import Image
 
 from services.account_service import account_service
 from services.config import config
+from services.log_service import LOG_TYPE_POLL, log_service
 from services.proxy_service import proxy_settings
 from utils.helper import UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid
 from utils.log import logger
@@ -745,19 +746,28 @@ class OpenAIBackendAPI:
         wait_secs = float(base_secs) + jitter_secs
         return float(base_secs), jitter_secs, wait_secs
 
+    @staticmethod
+    def _log_image_poll(summary: str, detail: dict[str, Any]) -> None:
+        try:
+            log_service.add(LOG_TYPE_POLL, summary, detail)
+        except Exception:
+            pass
+
     def _poll_image_results(self, conversation_id: str, timeout_secs: float = 120.0) -> ImagePollResult:
         """Poll until image ids, policy refusal text, or timeout."""
         start = time.time()
         attempt = 0
         interval = float(config.image_poll_interval_secs)
         initial_wait = float(config.image_poll_initial_wait_secs)
-        logger.info({
+        start_detail = {
             "event": "image_poll_start",
             "conversation_id": conversation_id,
             "timeout_secs": timeout_secs,
             "initial_wait_secs": initial_wait,
             "interval_secs": interval,
-        })
+        }
+        logger.info(start_detail)
+        self._log_image_poll("图片轮询开始", start_detail)
 
         def _remaining() -> float:
             return timeout_secs - (time.time() - start)
@@ -766,27 +776,47 @@ class OpenAIBackendAPI:
             jitter = random.uniform(0, min(2.0, initial_wait * 0.2))
             sleep_for = min(initial_wait + jitter, max(0.0, _remaining()))
             if sleep_for > 0:
+                detail = {
+                    "event": "image_poll_initial_wait",
+                    "conversation_id": conversation_id,
+                    "base_wait_secs": initial_wait,
+                    "jitter_secs": round(jitter, 3),
+                    "wait_secs": round(sleep_for, 3),
+                }
+                logger.debug(detail)
+                self._log_image_poll("图片轮询初始等待", detail)
                 time.sleep(sleep_for)
 
         def _retry_sleep(reason: str, status_code: int | None, error: str | None, retry_after: int | None) -> bool:
-            base = retry_after if retry_after is not None else min(2 ** min(attempt, 4), 16)
-            backoff = base + random.uniform(0, 0.5)
+            if retry_after is not None:
+                base_secs = float(retry_after)
+                jitter_secs = random.uniform(0, 0.5) if base_secs > 0 else 0.0
+                wait_secs = base_secs + jitter_secs
+            elif status_code == 429:
+                base_secs, jitter_secs, wait_secs = self._image_poll_delay(config.image_poll_rate_limit_retry_secs)
+            else:
+                base_secs = float(min(2 ** min(attempt, 4), 16))
+                jitter_secs = random.uniform(0, 0.5)
+                wait_secs = base_secs + jitter_secs
             remaining = _remaining()
             if remaining <= 0:
                 return False
-            sleep_for = min(backoff, remaining)
-            log_payload: Dict[str, Any] = {
+            sleep_for = min(wait_secs, remaining)
+            detail: Dict[str, Any] = {
                 "event": "image_poll_retry",
                 "conversation_id": conversation_id,
                 "attempt": attempt,
                 "reason": reason,
-                "sleep_secs": round(sleep_for, 2),
+                "base_wait_secs": base_secs,
+                "jitter_secs": round(jitter_secs, 3),
+                "wait_secs": round(sleep_for, 3),
             }
             if status_code is not None:
-                log_payload["status_code"] = status_code
+                detail["status_code"] = status_code
             if error is not None:
-                log_payload["error"] = error
-            logger.warning(log_payload)
+                detail["error"] = error
+            logger.warning(detail)
+            self._log_image_poll("图片轮询重试", detail)
             time.sleep(sleep_for)
             return True
 
@@ -808,7 +838,7 @@ class OpenAIBackendAPI:
                 if _is_rate_limit_error(exc):
                     base_secs, jitter_secs, wait_secs = self._image_poll_delay(config.image_poll_rate_limit_retry_secs)
                     sleep_for = min(wait_secs, max(0.0, _remaining()))
-                    logger.info({
+                    detail = {
                         "event": "image_poll_rate_limited",
                         "conversation_id": conversation_id,
                         "attempt": attempt,
@@ -817,45 +847,58 @@ class OpenAIBackendAPI:
                         "jitter_secs": round(jitter_secs, 3),
                         "retry_after_secs": round(sleep_for, 3),
                         "error": str(exc),
-                    })
+                    }
+                    logger.info(detail)
+                    self._log_image_poll("图片轮询 429 重试", detail)
                     if sleep_for > 0:
                         time.sleep(sleep_for)
                         continue
                     break
                 raise
             result = self._extract_image_poll_result(conversation)
-            logger.debug({"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt,
-                          "file_ids": result.file_ids, "sediment_ids": result.sediment_ids,
-                          "blocked": result.blocked, "message_preview": result.message[:160]})
+            check_detail = {"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt,
+                            "file_ids": result.file_ids, "sediment_ids": result.sediment_ids,
+                            "blocked": result.blocked, "message_preview": result.message[:160]}
+            logger.debug(check_detail)
             if result.file_ids:
-                logger.info({"event": "image_poll_hit", "conversation_id": conversation_id,
-                             "file_ids": result.file_ids, "sediment_ids": result.sediment_ids})
+                detail = {"event": "image_poll_hit", "conversation_id": conversation_id,
+                          "file_ids": result.file_ids, "sediment_ids": result.sediment_ids}
+                logger.info(detail)
+                self._log_image_poll("图片轮询命中", detail)
                 return result
             if result.sediment_ids:
-                logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": [],
-                             "sediment_ids": result.sediment_ids})
+                detail = {"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": [],
+                          "sediment_ids": result.sediment_ids}
+                logger.info(detail)
+                self._log_image_poll("图片轮询命中", detail)
                 return result
             if result.message and result.blocked:
-                logger.info({"event": "image_poll_rejected", "conversation_id": conversation_id,
-                             "message_preview": result.message[:160]})
+                detail = {"event": "image_poll_rejected", "conversation_id": conversation_id,
+                          "message_preview": result.message[:160]}
+                logger.info(detail)
+                self._log_image_poll("图片轮询拒绝", detail)
                 return result
             base_secs, jitter_secs, wait_secs = self._image_poll_delay(config.image_poll_interval_secs)
-            logger.debug({"event": "image_poll_wait", "conversation_id": conversation_id,
-                          "elapsed_secs": round(time.time() - start, 1),
-                          "base_wait_secs": base_secs,
-                          "jitter_secs": round(jitter_secs, 3),
-                          "wait_secs": round(min(wait_secs, max(0.0, _remaining())), 3)})
             sleep_for = min(wait_secs, max(0.0, _remaining()))
+            detail = {"event": "image_poll_wait", "conversation_id": conversation_id,
+                      "attempt": attempt,
+                      "elapsed_secs": round(time.time() - start, 1),
+                      "base_wait_secs": base_secs,
+                      "jitter_secs": round(jitter_secs, 3),
+                      "wait_secs": round(sleep_for, 3)}
+            logger.debug(detail)
+            self._log_image_poll("图片轮询等待", detail)
             if sleep_for > 0:
                 time.sleep(sleep_for)
-        logger.info({
+        detail = {
             "event": "image_poll_timeout",
             "conversation_id": conversation_id,
             "timeout_secs": timeout_secs,
             "attempts_made": attempt,
-            # attempts_made == 0 means the initial_wait consumed the entire budget — no HTTP attempted.
             "initial_wait_exhausted_budget": attempt == 0,
-        })
+        }
+        logger.info(detail)
+        self._log_image_poll("图片轮询超时", detail)
         raise ImagePollTimeoutError(
             f"ChatGPT 生图超时（已等待 {timeout_secs} 秒）。"
             f"当前超时阈值可在 config.json 中调大 image_poll_timeout_secs，"

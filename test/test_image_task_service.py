@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from services.image_task_service import ImageTaskService
 
@@ -27,6 +28,11 @@ def wait_for_task(service: ImageTaskService, identity: dict[str, object], task_i
 
 
 class ImageTaskServiceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.log_patcher = patch("services.image_task_service.log_service.add")
+        self.log_patcher.start()
+        self.addCleanup(self.log_patcher.stop)
+
     def make_service(self, path: Path, handler=None) -> ImageTaskService:
         return ImageTaskService(
             path,

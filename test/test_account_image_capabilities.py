@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Thread
 from time import monotonic, sleep
+from unittest.mock import patch
 
 os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
 
@@ -18,6 +19,11 @@ from utils.helper import anonymize_token
 
 
 class AccountCapabilityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.log_patcher = patch("services.account_service.log_service.add")
+        self.log_patcher.start()
+        self.addCleanup(self.log_patcher.stop)
+
     def test_unknown_quota_accounts_are_available_only_when_not_throttled(self) -> None:
         self.assertFalse(
             AccountService._is_image_account_available(

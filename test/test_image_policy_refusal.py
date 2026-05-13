@@ -28,6 +28,11 @@ def _conversation_with_image(file_id: str = "file-123") -> dict:
 
 
 class ImagePolicyRefusalTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.log_patcher = patch("services.openai_backend_api.log_service.add")
+        self.log_patcher.start()
+        self.addCleanup(self.log_patcher.stop)
+
     def patch_config(self, updates: dict[str, object]) -> None:
         original_config = dict(config.data)
         config.data.update(updates)

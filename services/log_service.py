@@ -20,6 +20,7 @@ from utils.helper import anthropic_sse_stream, sse_json_stream
 
 LOG_TYPE_CALL = "call"
 LOG_TYPE_ACCOUNT = "account"
+LOG_TYPE_POLL = "poll"
 
 
 class LogService:

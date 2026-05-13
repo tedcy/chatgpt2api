@@ -20,11 +20,13 @@ import { useAuthGuard } from "@/lib/use-auth-guard";
 const LogType = {
   Call: "call",
   Account: "account",
+  Poll: "poll",
 } as const;
 
 const typeLabels: Record<string, string> = {
   [LogType.Call]: "调用日志",
   [LogType.Account]: "账号管理日志",
+  [LogType.Poll]: "轮询日志",
 };
 
 function getDetailText(item: SystemLog, key: string) {
@@ -66,6 +68,7 @@ function LogsContent() {
   const detailUrls = getUrls(detailLog);
   const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
   const isCallLog = type === LogType.Call;
+  const isPollLog = type === LogType.Poll;
   const pageSize = 10;
   const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
   const safePage = Math.min(page, pageCount);
@@ -146,6 +149,7 @@ function LogsContent() {
             <SelectContent>
               <SelectItem value={LogType.Call}>调用日志</SelectItem>
               <SelectItem value={LogType.Account}>账号管理日志</SelectItem>
+              <SelectItem value={LogType.Poll}>轮询日志</SelectItem>
             </SelectContent>
           </Select>
           <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
@@ -196,6 +200,7 @@ function LogsContent() {
                   <TableHead>时间</TableHead>
                   <TableHead>类型</TableHead>
                   {isCallLog ? <TableHead>令牌名称</TableHead> : null}
+                  {isPollLog ? <TableHead>会话 ID</TableHead> : null}
                   {isCallLog ? <TableHead>调用耗时</TableHead> : null}
                   {isCallLog ? <TableHead>状态</TableHead> : null}
                   {isCallLog ? <TableHead className="w-36">图片</TableHead> : null}
@@ -214,6 +219,14 @@ function LogsContent() {
                       <TableCell className="whitespace-nowrap">{item.time}</TableCell>
                       <TableCell><Badge variant="secondary" className="rounded-md">{typeLabels[item.type] || item.type}</Badge></TableCell>
                       {isCallLog ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
+                      {isPollLog ? (
+                        <TableCell
+                          className="max-w-[280px] truncate font-mono text-xs text-stone-600"
+                          title={getDetailText(item, "conversation_id")}
+                        >
+                          {getDetailText(item, "conversation_id")}
+                        </TableCell>
+                      ) : null}
                       {isCallLog ? <TableCell>{formatDuration(item)}</TableCell> : null}
                       {isCallLog ? (
                         <TableCell>
