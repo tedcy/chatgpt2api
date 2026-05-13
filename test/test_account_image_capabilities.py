@@ -21,7 +21,7 @@ from utils.helper import anonymize_token
 class AccountCapabilityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.log_patcher = patch("services.account_service.log_service.add")
-        self.log_patcher.start()
+        self.log_add = self.log_patcher.start()
         self.addCleanup(self.log_patcher.stop)
 
     def test_unknown_quota_accounts_are_available_only_when_not_throttled(self) -> None:
@@ -148,6 +148,54 @@ class AccountCapabilityTests(unittest.TestCase):
 
             self.assertFalse(thread.is_alive())
             self.assertEqual(acquired, ["token-1"])
+
+    def test_acquire_timeout_logs_all_image_account_states(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account("token-1", {"status": "\u5f02\u5e38", "quota": 1})
+
+            with self.assertRaisesRegex(RuntimeError, "no available image quota"):
+                service._acquire_next_candidate_token(deadline=monotonic() + 0.01)
+
+            timeout_calls = [
+                call
+                for call in self.log_add.call_args_list
+                if len(call.args) >= 2 and call.args[1] == "图片账号获取超时"
+            ]
+            self.assertTrue(timeout_calls)
+            detail = timeout_calls[-1].args[2]
+            self.assertEqual(detail["event"], "image_account_acquire_timeout")
+            self.assertEqual(detail["accounts"][0]["status"], "\u5f02\u5e38")
+            self.assertEqual(detail["accounts"][0]["unavailable_reason"], "error")
+            self.assertEqual(detail["accounts"][0]["inflight"], 0)
+
+    def test_precheck_failure_logs_error_and_account_states(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account("token-1", {"status": "\u6b63\u5e38", "quota": 1})
+
+            def fail_precheck(*_args, **_kwargs):
+                raise RuntimeError("precheck down")
+
+            service.fetch_remote_info = fail_precheck  # type: ignore[method-assign]
+
+            with self.assertRaisesRegex(RuntimeError, "no available image quota"):
+                service.get_available_access_token(deadline=monotonic() + 0.01)
+
+            precheck_calls = [
+                call
+                for call in self.log_add.call_args_list
+                if len(call.args) >= 2 and call.args[1] == "图片账号预检失败"
+            ]
+            self.assertTrue(precheck_calls)
+            detail = precheck_calls[-1].args[2]
+            self.assertEqual(detail["event"], "image_account_precheck_failed")
+            self.assertEqual(detail["error"], "precheck down")
+            self.assertEqual(detail["error_type"], "RuntimeError")
+            self.assertEqual(detail["accounts"][0]["unavailable_reason"], "already_attempted")
+            self.assertEqual(detail["accounts"][0]["inflight"], 0)
 
 
 class TokenLogTests(unittest.TestCase):

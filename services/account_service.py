@@ -171,14 +171,86 @@ class AccountService:
     def image_acquire_timeout_secs(self) -> float:
         return self._image_acquire_timeout_secs()
 
+    def _image_account_snapshot_locked(self, excluded_tokens: set[str] | None = None) -> list[dict[str, Any]]:
+        excluded = set(excluded_tokens or set())
+        try:
+            max_concurrency = max(1, int(config.image_account_concurrency or 1))
+        except Exception:
+            max_concurrency = 1
+        items: list[dict[str, Any]] = []
+        for account in self._accounts.values():
+            token = account.get("access_token") or ""
+            status = account.get("status")
+            quota = int(account.get("quota") or 0)
+            image_quota_unknown = bool(account.get("image_quota_unknown"))
+            inflight = int(self._image_inflight.get(token, 0))
+            limit_until = self._image_limit_until(account)
+            limit_active = status == STATUS_RATE_LIMITED and not self._limit_until_expired(limit_until)
+            reason = "available"
+            if not token:
+                reason = "missing_token"
+            elif token in excluded:
+                reason = "already_attempted"
+            elif status == STATUS_DISABLED:
+                reason = "disabled"
+            elif status == STATUS_ERROR:
+                reason = "error"
+            elif limit_active:
+                reason = "rate_limited"
+            elif not image_quota_unknown and quota <= 0:
+                reason = "no_quota"
+            elif inflight >= max_concurrency:
+                reason = "concurrency_full"
+            items.append({
+                "token": anonymize_token(token),
+                "email": account.get("email"),
+                "status": status,
+                "quota": quota,
+                "image_quota_unknown": image_quota_unknown,
+                "restore_at": account.get("restore_at"),
+                "image_cooldown_until": account.get("image_cooldown_until"),
+                "inflight": inflight,
+                "max_concurrency": max_concurrency,
+                "excluded": token in excluded,
+                "available": reason == "available",
+                "unavailable_reason": reason,
+            })
+        return items
+
+    def _log_image_account_state_locked(
+        self,
+        summary: str,
+        event: str,
+        excluded_tokens: set[str] | None = None,
+        **detail: Any,
+    ) -> None:
+        try:
+            log_service.add(
+                LOG_TYPE_ACCOUNT,
+                summary,
+                {
+                    "event": event,
+                    **detail,
+                    "accounts": self._image_account_snapshot_locked(excluded_tokens),
+                },
+            )
+        except Exception:
+            pass
+
     def _acquire_next_candidate_token(
         self,
         excluded_tokens: set[str] | None = None,
         deadline: float | None = None,
     ) -> str:
+        wait_logged_at = 0.0
         with self._image_slot_condition:
             while True:
                 if deadline is not None and deadline - monotonic() <= 0:
+                    self._log_image_account_state_locked(
+                        "图片账号获取超时",
+                        "image_account_acquire_timeout",
+                        excluded_tokens,
+                    )
                     raise RuntimeError("no available image quota")
                 tokens = self._list_available_candidate_tokens(excluded_tokens)
                 if tokens:
@@ -186,6 +258,16 @@ class AccountService:
                     self._index += 1
                     self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
                     return access_token
+                now = monotonic()
+                if wait_logged_at <= 0 or now - wait_logged_at >= 30:
+                    remaining = (deadline - now) if deadline is not None else None
+                    self._log_image_account_state_locked(
+                        "图片账号等待可用",
+                        "image_account_waiting",
+                        excluded_tokens,
+                        remaining_secs=round(remaining, 1) if remaining is not None else None,
+                    )
+                    wait_logged_at = now
                 if deadline is not None:
                     remaining = deadline - monotonic()
                     self._image_slot_condition.wait(timeout=min(1.0, remaining))
@@ -212,12 +294,28 @@ class AccountService:
             attempted_tokens.add(access_token)
             try:
                 account = self.fetch_remote_info(access_token, "get_available_access_token")
-            except Exception:
+            except Exception as exc:
                 self.release_image_slot(access_token)
+                with self._image_slot_condition:
+                    self._log_image_account_state_locked(
+                        "图片账号预检失败",
+                        "image_account_precheck_failed",
+                        attempted_tokens,
+                        token=anonymize_token(access_token),
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
                 continue
             if self._is_image_account_available(account or {}):
                 return access_token
             self.release_image_slot(access_token)
+            with self._image_slot_condition:
+                self._log_image_account_state_locked(
+                    "图片账号预检不可用",
+                    "image_account_precheck_unavailable",
+                    attempted_tokens,
+                    token=anonymize_token(access_token),
+                )
 
     def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
         excluded = set(excluded_tokens or set())
