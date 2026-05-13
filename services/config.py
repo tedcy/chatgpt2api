@@ -251,6 +251,11 @@ class ConfigStore:
             return 3
 
     @property
+    def gpt_image_2_model(self) -> str:
+        value = str(self.data.get("gpt_image_2_model") or "gpt-5-5").strip()
+        return value or "gpt-5-5"
+
+    @property
     def auto_remove_invalid_accounts(self) -> bool:
         value = self.data.get("auto_remove_invalid_accounts", False)
         if isinstance(value, str):
@@ -336,6 +341,7 @@ class ConfigStore:
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
         data["image_account_concurrency"] = self.image_account_concurrency
+        data["gpt_image_2_model"] = self.gpt_image_2_model
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
         data["log_levels"] = self.log_levels

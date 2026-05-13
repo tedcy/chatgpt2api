@@ -403,7 +403,7 @@ class OpenAIBackendAPI:
         if not model:
             return "auto"
         if model == "gpt-image-2":
-            return "gpt-5-3"
+            return config.gpt_image_2_model
         if model == CODEX_IMAGE_MODEL:
             return model
         return "auto"
