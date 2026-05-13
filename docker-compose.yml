@@ -11,6 +11,7 @@ services:
     environment:
       # 存储后端配置 (可选值: json, sqlite, postgres, git)
        - STORAGE_BACKEND=json
+       - TZ=Asia/Shanghai
       
       # 数据库配置 (当 STORAGE_BACKEND=sqlite/postgres 时使用)
       # - DATABASE_URL=postgresql://user:password@host:5432/dbname
