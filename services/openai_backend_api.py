@@ -61,7 +61,6 @@ DEFAULT_CLIENT_VERSION = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad"
 DEFAULT_CLIENT_BUILD_NUMBER = "5955942"
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
-IMAGE_POLL_RATE_LIMIT_SLEEP_SECONDS = 20
 IMAGE_POLICY_REFUSAL_MARKERS = (
     "生成的图片可能违反",
     "裸露、色情或情色内容",
@@ -738,6 +737,14 @@ class OpenAIBackendAPI:
         blocked = any(bool(item.get("blocked")) for item in text_records) or self._looks_like_image_policy_refusal(message)
         return ImagePollResult(file_ids=file_ids, sediment_ids=sediment_ids, message=message, blocked=blocked)
 
+    @staticmethod
+    def _image_poll_delay(base_secs: float) -> tuple[float, float, float]:
+        jitter_min = config.image_poll_jitter_min_secs
+        jitter_max = config.image_poll_jitter_max_secs
+        jitter_secs = random.uniform(jitter_min, jitter_max) if jitter_max > 0 or jitter_min > 0 else 0.0
+        wait_secs = float(base_secs) + jitter_secs
+        return float(base_secs), jitter_secs, wait_secs
+
     def _poll_image_results(self, conversation_id: str, timeout_secs: float = 120.0) -> ImagePollResult:
         """Poll until image ids, policy refusal text, or timeout."""
         start = time.time()
@@ -799,7 +806,20 @@ class OpenAIBackendAPI:
                 break
             except RuntimeError as exc:
                 if _is_rate_limit_error(exc):
-                    if _retry_sleep("upstream_status", 429, str(exc), None):
+                    base_secs, jitter_secs, wait_secs = self._image_poll_delay(config.image_poll_rate_limit_retry_secs)
+                    sleep_for = min(wait_secs, max(0.0, _remaining()))
+                    logger.info({
+                        "event": "image_poll_rate_limited",
+                        "conversation_id": conversation_id,
+                        "attempt": attempt,
+                        "elapsed_secs": round(time.time() - start, 1),
+                        "base_retry_secs": base_secs,
+                        "jitter_secs": round(jitter_secs, 3),
+                        "retry_after_secs": round(sleep_for, 3),
+                        "error": str(exc),
+                    })
+                    if sleep_for > 0:
+                        time.sleep(sleep_for)
                         continue
                     break
                 raise
@@ -819,11 +839,15 @@ class OpenAIBackendAPI:
                 logger.info({"event": "image_poll_rejected", "conversation_id": conversation_id,
                              "message_preview": result.message[:160]})
                 return result
+            base_secs, jitter_secs, wait_secs = self._image_poll_delay(config.image_poll_interval_secs)
             logger.debug({"event": "image_poll_wait", "conversation_id": conversation_id,
-                          "elapsed_secs": round(time.time() - start, 1)})
-            wait = min(interval, max(0.0, _remaining()))
-            if wait > 0:
-                time.sleep(wait)
+                          "elapsed_secs": round(time.time() - start, 1),
+                          "base_wait_secs": base_secs,
+                          "jitter_secs": round(jitter_secs, 3),
+                          "wait_secs": round(min(wait_secs, max(0.0, _remaining())), 3)})
+            sleep_for = min(wait_secs, max(0.0, _remaining()))
+            if sleep_for > 0:
+                time.sleep(sleep_for)
         logger.info({
             "event": "image_poll_timeout",
             "conversation_id": conversation_id,

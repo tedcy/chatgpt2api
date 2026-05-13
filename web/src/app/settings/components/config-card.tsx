@@ -25,6 +25,11 @@ export function ConfigCard() {
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
+  const setImagePollIntervalSecs = useSettingsStore((state) => state.setImagePollIntervalSecs);
+  const setImagePollRateLimitRetrySecs = useSettingsStore((state) => state.setImagePollRateLimitRetrySecs);
+  const setImageRateLimitCooldownSecs = useSettingsStore((state) => state.setImageRateLimitCooldownSecs);
+  const setImagePollJitterMinSecs = useSettingsStore((state) => state.setImagePollJitterMinSecs);
+  const setImagePollJitterMaxSecs = useSettingsStore((state) => state.setImagePollJitterMaxSecs);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
   const setGptImage2Model = useSettingsStore((state) => state.setGptImage2Model);
   const setAutoRemoveInvalidAccounts = useSettingsStore((state) => state.setAutoRemoveInvalidAccounts);
@@ -153,6 +158,8 @@ export function ConfigCard() {
           <div className="space-y-2">
             <label className="text-sm text-stone-700">图片轮询超时</label>
             <Input
+              type="number"
+              min={1}
               value={String(config?.image_poll_timeout_secs || "")}
               onChange={(event) => setImagePollTimeoutSecs(event.target.value)}
               placeholder="120"
@@ -161,8 +168,70 @@ export function ConfigCard() {
             <p className="text-xs text-stone-500">单位秒，等待上游图片结果的最长时间。</p>
           </div>
           <div className="space-y-2">
+            <label className="text-sm text-stone-700">图片普通轮询间隔</label>
+            <Input
+              type="number"
+              min={1}
+              value={String(config?.image_poll_interval_secs || "")}
+              onChange={(event) => setImagePollIntervalSecs(event.target.value)}
+              placeholder="4"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位秒，未拿到图片结果时的基础等待时间。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">图片 429 重试间隔</label>
+            <Input
+              type="number"
+              min={1}
+              value={String(config?.image_poll_rate_limit_retry_secs || "")}
+              onChange={(event) => setImagePollRateLimitRetrySecs(event.target.value)}
+              placeholder="20"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位秒，查询 conversation 遇到 429 后的基础等待时间。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">图片限流冷却</label>
+            <Input
+              type="number"
+              min={1}
+              value={String(config?.image_rate_limit_cooldown_secs || "")}
+              onChange={(event) => setImageRateLimitCooldownSecs(event.target.value)}
+              placeholder="30"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位秒，账号触发本地图片限流后的固定恢复时间。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">轮询随机附加下限</label>
+            <Input
+              type="number"
+              min={0}
+              value={String(config?.image_poll_jitter_min_secs ?? "")}
+              onChange={(event) => setImagePollJitterMinSecs(event.target.value)}
+              placeholder="0"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位秒，只叠加到图片轮询等待。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">轮询随机附加上限</label>
+            <Input
+              type="number"
+              min={0}
+              value={String(config?.image_poll_jitter_max_secs ?? "")}
+              onChange={(event) => setImagePollJitterMaxSecs(event.target.value)}
+              placeholder="0"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">保存时会保证上限不低于下限。</p>
+          </div>
+          <div className="space-y-2">
             <label className="text-sm text-stone-700">单账号图片并发</label>
             <Input
+              type="number"
+              min={1}
               value={String(config?.image_account_concurrency || "")}
               onChange={(event) => setImageAccountConcurrency(event.target.value)}
               placeholder="1"

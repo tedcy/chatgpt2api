@@ -235,13 +235,39 @@ class ConfigStore:
 
     @property
     def image_poll_initial_wait_secs(self) -> float:
-        """Image generation upstream takes ~30s; polling immediately wastes requests
-        and trips a transient 429. Default 10s gives the conversation document time
-        to commit before the first poll."""
         try:
             return max(0.0, float(self.data.get("image_poll_initial_wait_secs", 10.0)))
         except (TypeError, ValueError):
             return 10.0
+
+    @property
+    def image_poll_rate_limit_retry_secs(self) -> int:
+        try:
+            return max(1, int(self.data.get("image_poll_rate_limit_retry_secs", 20)))
+        except (TypeError, ValueError):
+            return 20
+
+    @property
+    def image_rate_limit_cooldown_secs(self) -> int:
+        try:
+            return max(1, int(self.data.get("image_rate_limit_cooldown_secs", 30)))
+        except (TypeError, ValueError):
+            return 30
+
+    @property
+    def image_poll_jitter_min_secs(self) -> int:
+        try:
+            return max(0, int(self.data.get("image_poll_jitter_min_secs", 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    @property
+    def image_poll_jitter_max_secs(self) -> int:
+        try:
+            value = max(0, int(self.data.get("image_poll_jitter_max_secs", 0)))
+        except (TypeError, ValueError):
+            value = 0
+        return max(self.image_poll_jitter_min_secs, value)
 
     @property
     def image_account_concurrency(self) -> int:
@@ -340,6 +366,10 @@ class ConfigStore:
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
+        data["image_poll_rate_limit_retry_secs"] = self.image_poll_rate_limit_retry_secs
+        data["image_rate_limit_cooldown_secs"] = self.image_rate_limit_cooldown_secs
+        data["image_poll_jitter_min_secs"] = self.image_poll_jitter_min_secs
+        data["image_poll_jitter_max_secs"] = self.image_poll_jitter_max_secs
         data["image_account_concurrency"] = self.image_account_concurrency
         data["gpt_image_2_model"] = self.gpt_image_2_model
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts

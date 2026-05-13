@@ -86,6 +86,11 @@ export type SettingsConfig = {
   refresh_account_interval_minute?: number | string;
   image_retention_days?: number | string;
   image_poll_timeout_secs?: number | string;
+  image_poll_interval_secs?: number | string;
+  image_poll_rate_limit_retry_secs?: number | string;
+  image_rate_limit_cooldown_secs?: number | string;
+  image_poll_jitter_min_secs?: number | string;
+  image_poll_jitter_max_secs?: number | string;
   image_account_concurrency?: number | string;
   gpt_image_2_model?: string;
   auto_remove_invalid_accounts?: boolean;

@@ -12,6 +12,7 @@ os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
 
 from services.account_service import AccountService
 from services.auth_service import AuthService
+from services.config import config
 from services.storage.json_storage import JSONStorageBackend
 from utils.helper import anonymize_token
 
@@ -99,6 +100,29 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertIsNotNone(updated["image_cooldown_until"])
             self.assertNotIn("token-1", service._image_inflight)
             self.assertFalse(AccountService._is_image_account_available(updated))
+
+    def test_mark_image_rate_limited_uses_configured_cooldown_without_jitter(self) -> None:
+        original_config = dict(config.data)
+        config.data.update({
+            "image_rate_limit_cooldown_secs": 7,
+            "image_poll_jitter_min_secs": 20,
+            "image_poll_jitter_max_secs": 30,
+        })
+        self.addCleanup(lambda: setattr(config, "data", original_config))
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account("token-1", {"status": "\u6b63\u5e38", "quota": 1})
+
+            started_at = datetime.now(timezone.utc)
+            updated = service.mark_image_rate_limited("token-1", "unit_test")
+
+            self.assertIsNotNone(updated)
+            cooldown_until = datetime.fromisoformat(str(updated["image_cooldown_until"]))
+            elapsed = (cooldown_until - started_at).total_seconds()
+            self.assertGreaterEqual(elapsed, 6.5)
+            self.assertLess(elapsed, 10)
 
     def test_acquire_waits_until_account_becomes_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

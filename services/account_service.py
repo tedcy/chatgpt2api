@@ -22,7 +22,6 @@ STATUS_DISABLED = "\u7981\u7528"
 STATUS_RATE_LIMITED = "\u9650\u6d41"
 STATUS_ERROR = "\u5f02\u5e38"
 STATUS_NORMAL = "\u6b63\u5e38"
-IMAGE_RATE_LIMIT_COOLDOWN_SECONDS = 30
 
 
 def _clean_string(value: Any) -> str:
@@ -440,7 +439,8 @@ class AccountService:
     def mark_image_rate_limited(self, access_token: str, reason: str = "image_rate_limit") -> dict | None:
         if not access_token:
             return None
-        cooldown_until = (datetime.now(timezone.utc) + timedelta(seconds=IMAGE_RATE_LIMIT_COOLDOWN_SECONDS)).isoformat()
+        cooldown_secs = config.image_rate_limit_cooldown_secs
+        cooldown_until = (datetime.now(timezone.utc) + timedelta(seconds=cooldown_secs)).isoformat()
         with self._image_slot_condition:
             current_inflight = int(self._image_inflight.get(access_token, 0))
             if current_inflight <= 1:
@@ -473,6 +473,7 @@ class AccountService:
                 {
                     "source": reason,
                     "token": anonymize_token(access_token),
+                    "cooldown_secs": cooldown_secs,
                     "cooldown_until": account.get("image_cooldown_until"),
                 },
             )
