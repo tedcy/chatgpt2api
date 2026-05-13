@@ -6,6 +6,7 @@
   "image_poll_interval_secs": 4,
   "image_poll_rate_limit_retry_secs": 20,
   "image_rate_limit_cooldown_secs": 30,
+  "image_task_next_interval_secs": 0,
   "image_poll_jitter_min_secs": 0,
   "image_poll_jitter_max_secs": 0,
   "auto_remove_rate_limited_accounts": false,

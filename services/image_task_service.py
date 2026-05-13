@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import threading
 import time
 from collections.abc import Callable
@@ -95,6 +96,7 @@ class ImageTaskService:
         self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
         self._pending_payloads: dict[str, tuple[str, dict[str, Any], dict[str, object], str]] = {}
+        self._task_start_cooldowns: list[float] = []
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
             self._tasks = self._load_locked()
@@ -220,9 +222,26 @@ class ImageTaskService:
             per_account = 1
         return max(1, max(1, account_count) * per_account)
 
+    def _prune_task_start_cooldowns_locked(self) -> None:
+        now = time.monotonic()
+        self._task_start_cooldowns = [until for until in self._task_start_cooldowns if until > now]
+
+    @staticmethod
+    def _task_next_interval_delay() -> tuple[float, float, float]:
+        base_secs = float(config.image_task_next_interval_secs)
+        if base_secs <= 0:
+            return 0.0, 0.0, 0.0
+        jitter_min = config.image_poll_jitter_min_secs
+        jitter_max = config.image_poll_jitter_max_secs
+        jitter_secs = random.uniform(jitter_min, jitter_max) if jitter_max > 0 or jitter_min > 0 else 0.0
+        wait_secs = base_secs + jitter_secs
+        return base_secs, jitter_secs, wait_secs
+
     def _start_queued_tasks_locked(self) -> list[tuple[str, str, dict[str, Any], dict[str, object], str]]:
+        self._prune_task_start_cooldowns_locked()
         running = sum(1 for task in self._tasks.values() if task.get("status") == TASK_STATUS_RUNNING)
-        slots = max(0, self._task_worker_limit() - running)
+        cooling_down = len(self._task_start_cooldowns)
+        slots = max(0, self._task_worker_limit() - running - cooling_down)
         if slots <= 0:
             return []
 
@@ -259,6 +278,22 @@ class ImageTaskService:
             starts = self._start_queued_tasks_locked()
         self._start_task_threads(starts)
 
+    def _start_queued_tasks_after_delay(self, delay_secs: float) -> None:
+        if delay_secs <= 0:
+            self._start_queued_tasks()
+            return
+
+        def delayed_start() -> None:
+            time.sleep(delay_secs)
+            self._start_queued_tasks()
+
+        thread = threading.Thread(
+            target=delayed_start,
+            name="image-task-next-delay",
+            daemon=True,
+        )
+        thread.start()
+
     def _start_task_threads(self, starts: list[tuple[str, str, dict[str, Any], dict[str, object], str]]) -> None:
         for key, mode, payload, identity, model in starts:
             task_id = key.rsplit(":", 1)[-1]
@@ -280,6 +315,7 @@ class ImageTaskService:
     ) -> None:
         started = time.time()
         self._update_task(key, status=TASK_STATUS_RUNNING, error="")
+        next_delay_secs = 0.0
         try:
             handler = self.edit_handler if mode == "edit" else self.generation_handler
             result = handler(payload)
@@ -293,7 +329,7 @@ class ImageTaskService:
                 else:
                     message = "号池中没有可用账号或所有账号均被限流，请检查号池状态（账号额度、是否被封禁、是否到达生图上限）"
                 raise RuntimeError(message)
-            self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, error="")
+            next_delay_secs = self._complete_task(key, status=TASK_STATUS_SUCCESS, data=data, error="")
             self._log_call(
                 identity,
                 mode,
@@ -305,7 +341,7 @@ class ImageTaskService:
             )
         except Exception as exc:
             error_message = str(exc) or "image task failed"
-            self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[])
+            next_delay_secs = self._complete_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[])
             self._log_call(
                 identity,
                 mode,
@@ -317,7 +353,7 @@ class ImageTaskService:
                 error=error_message,
             )
         finally:
-            self._start_queued_tasks()
+            self._start_queued_tasks_after_delay(next_delay_secs)
 
     def _log_call(
         self,
@@ -364,6 +400,18 @@ class ImageTaskService:
             task.update(updates)
             task["updated_at"] = _now_iso()
             self._save_locked()
+
+    def _complete_task(self, key: str, **updates: Any) -> float:
+        _, _, wait_secs = self._task_next_interval_delay()
+        with self._lock:
+            task = self._tasks.get(key)
+            if task is not None:
+                task.update(updates)
+                task["updated_at"] = _now_iso()
+                if wait_secs > 0:
+                    self._task_start_cooldowns.append(time.monotonic() + wait_secs)
+                self._save_locked()
+        return wait_secs
 
     def _load_locked(self) -> dict[str, dict[str, Any]]:
         if not self.path.exists():

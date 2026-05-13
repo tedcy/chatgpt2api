@@ -89,6 +89,7 @@ export type SettingsConfig = {
   image_poll_interval_secs?: number | string;
   image_poll_rate_limit_retry_secs?: number | string;
   image_rate_limit_cooldown_secs?: number | string;
+  image_task_next_interval_secs?: number | string;
   image_poll_jitter_min_secs?: number | string;
   image_poll_jitter_max_secs?: number | string;
   image_account_concurrency?: number | string;

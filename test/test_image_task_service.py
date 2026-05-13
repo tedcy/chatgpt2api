@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from services.config import config
 from services.image_task_service import ImageTaskService
 
 
@@ -40,6 +41,67 @@ class ImageTaskServiceTests(unittest.TestCase):
             edit_handler=handler or (lambda _payload: {"data": [{"url": "http://example.test/edit.png"}]}),
             retention_days_getter=lambda: 30,
         )
+
+    def patch_config(self, updates: dict[str, object]) -> None:
+        original_config = dict(config.data)
+        config.data.update(updates)
+        self.addCleanup(lambda: setattr(config, "data", original_config))
+
+    def test_task_next_interval_delay_uses_configured_base_plus_jitter(self):
+        self.patch_config({
+            "image_task_next_interval_secs": 11,
+            "image_poll_jitter_min_secs": 2,
+            "image_poll_jitter_max_secs": 4,
+        })
+
+        with patch("services.image_task_service.random.uniform", return_value=3.0) as uniform_mock:
+            base_secs, jitter_secs, wait_secs = ImageTaskService._task_next_interval_delay()
+
+        uniform_mock.assert_called_once_with(2, 4)
+        self.assertEqual(base_secs, 11.0)
+        self.assertEqual(jitter_secs, 3.0)
+        self.assertEqual(wait_secs, 14.0)
+
+    def test_completed_worker_waits_before_starting_next_queued_task(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            events: list[tuple[str, str, float]] = []
+            lock = threading.Lock()
+
+            def handler(payload):
+                with lock:
+                    events.append((payload["prompt"], "start", time.monotonic()))
+                time.sleep(0.03)
+                with lock:
+                    events.append((payload["prompt"], "end", time.monotonic()))
+                return {"data": [{"url": f"http://example.test/{payload['prompt']}.png"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service._task_worker_limit = lambda: 1  # type: ignore[method-assign]
+            service._task_next_interval_delay = lambda: (0.02, 0.03, 0.05)  # type: ignore[method-assign]
+
+            service.submit_generation(
+                OWNER,
+                client_task_id="task-1",
+                prompt="cat",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+            time.sleep(0.005)
+            service.submit_generation(
+                OWNER,
+                client_task_id="task-2",
+                prompt="dog",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+
+            wait_for_task(service, OWNER, "task-1", "success")
+            wait_for_task(service, OWNER, "task-2", "success")
+
+            event_map = {(prompt, event): timestamp for prompt, event, timestamp in events}
+            self.assertGreaterEqual(event_map[("dog", "start")] - event_map[("cat", "end")], 0.045)
 
     def test_duplicate_submit_uses_existing_task(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

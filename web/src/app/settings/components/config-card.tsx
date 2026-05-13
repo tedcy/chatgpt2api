@@ -28,6 +28,7 @@ export function ConfigCard() {
   const setImagePollIntervalSecs = useSettingsStore((state) => state.setImagePollIntervalSecs);
   const setImagePollRateLimitRetrySecs = useSettingsStore((state) => state.setImagePollRateLimitRetrySecs);
   const setImageRateLimitCooldownSecs = useSettingsStore((state) => state.setImageRateLimitCooldownSecs);
+  const setImageTaskNextIntervalSecs = useSettingsStore((state) => state.setImageTaskNextIntervalSecs);
   const setImagePollJitterMinSecs = useSettingsStore((state) => state.setImagePollJitterMinSecs);
   const setImagePollJitterMaxSecs = useSettingsStore((state) => state.setImagePollJitterMaxSecs);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
@@ -204,6 +205,18 @@ export function ConfigCard() {
             <p className="text-xs text-stone-500">单位秒，账号触发本地图片限流后的固定恢复时间。</p>
           </div>
           <div className="space-y-2">
+            <label className="text-sm text-stone-700">图片任务衔接间隔</label>
+            <Input
+              type="number"
+              min={0}
+              value={String(config?.image_task_next_interval_secs ?? "")}
+              onChange={(event) => setImageTaskNextIntervalSecs(event.target.value)}
+              placeholder="0"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位秒，每个并发槽完成一张后等待多久再处理下一张；大于 0 时会叠加轮询随机范围。</p>
+          </div>
+          <div className="space-y-2">
             <label className="text-sm text-stone-700">轮询随机附加下限</label>
             <Input
               type="number"
@@ -213,7 +226,7 @@ export function ConfigCard() {
               placeholder="0"
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
-            <p className="text-xs text-stone-500">单位秒，只叠加到图片轮询等待。</p>
+            <p className="text-xs text-stone-500">单位秒，叠加到图片轮询等待和图片任务衔接等待。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">轮询随机附加上限</label>

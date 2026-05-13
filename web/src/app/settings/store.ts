@@ -91,6 +91,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_poll_interval_secs: Math.max(1, Number(config.image_poll_interval_secs) || 4),
     image_poll_rate_limit_retry_secs: Math.max(1, Number(config.image_poll_rate_limit_retry_secs) || 20),
     image_rate_limit_cooldown_secs: Math.max(1, Number(config.image_rate_limit_cooldown_secs) || 30),
+    image_task_next_interval_secs: Math.max(0, Number(config.image_task_next_interval_secs) || 0),
     image_poll_jitter_min_secs: imagePollJitterMinSecs,
     image_poll_jitter_max_secs: imagePollJitterMaxSecs,
     image_account_concurrency: Number(config.image_account_concurrency || 3),
@@ -214,6 +215,7 @@ type SettingsStore = {
   setImagePollIntervalSecs: (value: string) => void;
   setImagePollRateLimitRetrySecs: (value: string) => void;
   setImageRateLimitCooldownSecs: (value: string) => void;
+  setImageTaskNextIntervalSecs: (value: string) => void;
   setImagePollJitterMinSecs: (value: string) => void;
   setImagePollJitterMaxSecs: (value: string) => void;
   setImageAccountConcurrency: (value: string) => void;
@@ -358,6 +360,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_poll_interval_secs: Math.max(1, Number(config.image_poll_interval_secs) || 4),
         image_poll_rate_limit_retry_secs: Math.max(1, Number(config.image_poll_rate_limit_retry_secs) || 20),
         image_rate_limit_cooldown_secs: Math.max(1, Number(config.image_rate_limit_cooldown_secs) || 30),
+        image_task_next_interval_secs: Math.max(0, Number(config.image_task_next_interval_secs) || 0),
         image_poll_jitter_min_secs: imagePollJitterMinSecs,
         image_poll_jitter_max_secs: imagePollJitterMaxSecs,
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
@@ -441,6 +444,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageRateLimitCooldownSecs: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_rate_limit_cooldown_secs: value } } : {});
+  },
+
+  setImageTaskNextIntervalSecs: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_task_next_interval_secs: value } } : {});
   },
 
   setImagePollJitterMinSecs: (value) => {
