@@ -62,6 +62,30 @@ class ImagePolicyRefusalTests(unittest.TestCase):
         self.assertEqual(result.file_ids, [])
         self.assertEqual(result.sediment_ids, [])
 
+    def test_extracts_prompt_policy_refusal_from_conversation_mapping(self):
+        backend = OpenAIBackendAPI(access_token="")
+        result = backend._extract_image_poll_result({
+            "mapping": {
+                "assistant-message": {
+                    "message": {
+                        "author": {"role": "assistant"},
+                        "create_time": 1,
+                        "content": {
+                            "content_type": "text",
+                            "parts": [
+                                "非常抱歉，该提示可能违反了我们的内容政策。如果你认为此判断有误，请重试或修改提示语。",
+                            ],
+                        },
+                    },
+                },
+            },
+        })
+
+        self.assertTrue(result.blocked)
+        self.assertIn("内容政策", result.message)
+        self.assertEqual(result.file_ids, [])
+        self.assertEqual(result.sediment_ids, [])
+
     def test_sse_policy_refusal_text_marks_stream_blocked(self):
         events = list(iter_conversation_payloads(iter([
             json.dumps({
@@ -76,6 +100,21 @@ class ImagePolicyRefusalTests(unittest.TestCase):
         self.assertEqual(events[0]["type"], "conversation.delta")
         self.assertTrue(events[0]["blocked"])
         self.assertIn("非常抱歉", events[0]["text"])
+
+    def test_sse_prompt_policy_refusal_text_marks_stream_blocked(self):
+        events = list(iter_conversation_payloads(iter([
+            json.dumps({
+                "type": "unknown",
+                "v": {
+                    "notice": "非常抱歉，该提示可能违反了我们的内容政策。如果你认为此判断有误，请重试或修改提示语。",
+                },
+            }, ensure_ascii=False),
+            "[DONE]",
+        ])))
+
+        self.assertEqual(events[0]["type"], "conversation.delta")
+        self.assertTrue(events[0]["blocked"])
+        self.assertIn("内容政策", events[0]["text"])
 
     def test_poll_wait_uses_configured_interval_plus_jitter(self):
         self.patch_config({

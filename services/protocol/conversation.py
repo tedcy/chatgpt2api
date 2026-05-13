@@ -60,6 +60,8 @@ def is_image_rate_limit_error(message: str) -> bool:
 
 IMAGE_POLICY_REFUSAL_MARKERS = (
     "生成的图片可能违反",
+    "提示可能违反",
+    "内容政策",
     "裸露、色情或情色内容",
     "防护限制",
     "违反了关于",

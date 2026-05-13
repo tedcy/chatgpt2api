@@ -64,6 +64,8 @@ DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
 IMAGE_POLICY_REFUSAL_MARKERS = (
     "生成的图片可能违反",
+    "提示可能违反",
+    "内容政策",
     "裸露、色情或情色内容",
     "防护限制",
     "违反了关于",
