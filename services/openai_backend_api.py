@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import random
 import re
@@ -25,8 +26,17 @@ class InvalidAccessTokenError(RuntimeError):
     pass
 
 
+class ImagePolicyRejectionError(RuntimeError):
+    pass
+
+
 class ImagePollTimeoutError(RuntimeError):
     pass
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return "status=429" in text or "too many requests" in text
 
 
 @dataclass
@@ -39,10 +49,28 @@ class ChatRequirements:
     raw_finalize: Optional[Dict[str, Any]] = None
 
 
+@dataclass
+class ImagePollResult:
+    file_ids: list[str]
+    sediment_ids: list[str]
+    message: str = ""
+    blocked: bool = False
+
+
 DEFAULT_CLIENT_VERSION = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad"
 DEFAULT_CLIENT_BUILD_NUMBER = "5955942"
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
+IMAGE_POLL_RATE_LIMIT_SLEEP_SECONDS = 20
+IMAGE_POLICY_REFUSAL_MARKERS = (
+    "生成的图片可能违反",
+    "裸露、色情或情色内容",
+    "防护限制",
+    "违反了关于",
+    "violat",
+    "content policy",
+    "safety system",
+)
 
 
 class OpenAIBackendAPI:
@@ -611,6 +639,40 @@ class OpenAIBackendAPI:
         ensure_ok(response, path)
         return response.json()
 
+    @staticmethod
+    def _message_content_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(OpenAIBackendAPI._message_content_text(item) for item in content)
+        if not isinstance(content, dict):
+            return ""
+        parts = content.get("parts")
+        if isinstance(parts, list):
+            return OpenAIBackendAPI._message_content_text(parts)
+        for key in ("text", "result", "message"):
+            value = content.get(key)
+            if isinstance(value, str):
+                return value
+        return OpenAIBackendAPI._message_content_text(content.get("content"))
+
+    @staticmethod
+    def _looks_like_image_policy_refusal(text: str) -> bool:
+        normalized = str(text or "").strip().lower()
+        return bool(normalized) and any(marker in normalized for marker in IMAGE_POLICY_REFUSAL_MARKERS)
+
+    @staticmethod
+    def _metadata_indicates_blocked(metadata: Any) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+        if metadata.get("blocked") is True or metadata.get("is_blocked") is True:
+            return True
+        try:
+            text = json.dumps(metadata, ensure_ascii=False).lower()
+        except Exception:
+            return False
+        return '"blocked": true' in text or "content_policy" in text or "policy_violation" in text
+
     def _extract_image_tool_records(self, data: Dict[str, Any]) -> list[Dict[str, Any]]:
         """从 conversation 明细里提取图片工具输出记录。"""
         mapping = data.get("mapping") or {}
@@ -643,18 +705,41 @@ class OpenAIBackendAPI:
                  "sediment_ids": sediment_ids})
         return sorted(records, key=lambda item: item["create_time"])
 
-    def _poll_image_results(self, conversation_id: str, timeout_secs: float = 120.0) -> tuple[list[str], list[str]]:
-        """Poll the conversation document until image file ids appear or budget runs out.
+    def _extract_assistant_text_records(self, data: Dict[str, Any]) -> list[Dict[str, Any]]:
+        mapping = data.get("mapping") or {}
+        records = []
+        for message_id, node in mapping.items():
+            message = (node or {}).get("message") or {}
+            author = message.get("author") or {}
+            if author.get("role") != "assistant":
+                continue
+            text = self._message_content_text(message.get("content") or "").strip()
+            if not text:
+                continue
+            records.append({
+                "message_id": message_id,
+                "create_time": message.get("create_time") or 0,
+                "text": text,
+                "blocked": self._metadata_indicates_blocked(message.get("metadata") or {}),
+            })
+        return sorted(records, key=lambda item: item["create_time"])
 
-        - Sleeps image_poll_initial_wait_secs first (default 10s, +jitter). ChatGPT
-          image generation takes ~30s; polling immediately wastes requests and trips
-          a transient 429 the upstream returns within ~200ms of the SSE stream
-          closing (the conversation document is not yet committed).
-        - Subsequent polls are image_poll_interval_secs apart (default 10s).
-        - On upstream 429 / 5xx or network errors, backs off exponentially
-          (capped at 16s, +jitter) honoring Retry-After when present.
-        - All sleeps stay within timeout_secs; on exhaustion raises ImagePollTimeoutError.
-        """
+    def _extract_image_poll_result(self, data: Dict[str, Any]) -> ImagePollResult:
+        file_ids, sediment_ids = [], []
+        for record in self._extract_image_tool_records(data):
+            for file_id in record["file_ids"]:
+                if file_id not in file_ids:
+                    file_ids.append(file_id)
+            for sediment_id in record["sediment_ids"]:
+                if sediment_id not in sediment_ids:
+                    sediment_ids.append(sediment_id)
+        text_records = self._extract_assistant_text_records(data)
+        message = str((text_records[-1] or {}).get("text") or "") if text_records else ""
+        blocked = any(bool(item.get("blocked")) for item in text_records) or self._looks_like_image_policy_refusal(message)
+        return ImagePollResult(file_ids=file_ids, sediment_ids=sediment_ids, message=message, blocked=blocked)
+
+    def _poll_image_results(self, conversation_id: str, timeout_secs: float = 120.0) -> ImagePollResult:
+        """Poll until image ids, policy refusal text, or timeout."""
         start = time.time()
         attempt = 0
         interval = float(config.image_poll_interval_secs)
@@ -677,7 +762,6 @@ class OpenAIBackendAPI:
                 time.sleep(sleep_for)
 
         def _retry_sleep(reason: str, status_code: int | None, error: str | None, retry_after: int | None) -> bool:
-            # retry_after=0 means "retry immediately" — must not be coerced via falsy check.
             base = retry_after if retry_after is not None else min(2 ** min(attempt, 4), 16)
             backoff = base + random.uniform(0, 0.5)
             remaining = _remaining()
@@ -713,25 +797,28 @@ class OpenAIBackendAPI:
                 if _retry_sleep("network", None, str(exc), None):
                     continue
                 break
-
-            file_ids, sediment_ids = [], []
-            for record in self._extract_image_tool_records(conversation):
-                for file_id in record["file_ids"]:
-                    if file_id not in file_ids:
-                        file_ids.append(file_id)
-                for sediment_id in record["sediment_ids"]:
-                    if sediment_id not in sediment_ids:
-                        sediment_ids.append(sediment_id)
+            except RuntimeError as exc:
+                if _is_rate_limit_error(exc):
+                    if _retry_sleep("upstream_status", 429, str(exc), None):
+                        continue
+                    break
+                raise
+            result = self._extract_image_poll_result(conversation)
             logger.debug({"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt,
-                          "file_ids": file_ids, "sediment_ids": sediment_ids})
-            if file_ids:
-                logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": file_ids,
-                             "sediment_ids": sediment_ids})
-                return file_ids, sediment_ids
-            if sediment_ids:
+                          "file_ids": result.file_ids, "sediment_ids": result.sediment_ids,
+                          "blocked": result.blocked, "message_preview": result.message[:160]})
+            if result.file_ids:
+                logger.info({"event": "image_poll_hit", "conversation_id": conversation_id,
+                             "file_ids": result.file_ids, "sediment_ids": result.sediment_ids})
+                return result
+            if result.sediment_ids:
                 logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": [],
-                             "sediment_ids": sediment_ids})
-                return [], sediment_ids
+                             "sediment_ids": result.sediment_ids})
+                return result
+            if result.message and result.blocked:
+                logger.info({"event": "image_poll_rejected", "conversation_id": conversation_id,
+                             "message_preview": result.message[:160]})
+                return result
             logger.debug({"event": "image_poll_wait", "conversation_id": conversation_id,
                           "elapsed_secs": round(time.time() - start, 1)})
             wait = min(interval, max(0.0, _remaining()))
@@ -852,10 +939,11 @@ class OpenAIBackendAPI:
         sediment_ids = list(sediment_ids)
         if poll and conversation_id and not file_ids and not sediment_ids:
             logger.info({"event": "image_resolve_poll_needed", "conversation_id": conversation_id})
-            polled_file_ids, polled_sediment_ids = self._poll_image_results(conversation_id,
-                                                                            config.image_poll_timeout_secs)
-            file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
-            sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
+            poll_result = self._poll_image_results(conversation_id, config.image_poll_timeout_secs)
+            if poll_result.message and poll_result.blocked and not poll_result.file_ids and not poll_result.sediment_ids:
+                raise ImagePolicyRejectionError(poll_result.message)
+            file_ids.extend(item for item in poll_result.file_ids if item and item not in file_ids)
+            sediment_ids.extend(item for item in poll_result.sediment_ids if item and item not in sediment_ids)
         return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
 
     def download_image_bytes(self, urls: list[str]) -> list[bytes]:

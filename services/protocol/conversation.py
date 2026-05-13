@@ -12,7 +12,7 @@ import tiktoken
 from services.account_service import account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
-from services.openai_backend_api import ImagePollTimeoutError, OpenAIBackendAPI
+from services.openai_backend_api import ImagePolicyRejectionError, ImagePollTimeoutError, OpenAIBackendAPI
 from utils.helper import IMAGE_MODELS, extract_image_from_message_content
 from utils.log import logger
 
@@ -51,6 +51,44 @@ def is_token_invalid_error(message: str) -> bool:
         or "authentication token has been invalidated" in text
         or "invalidated oauth token" in text
     )
+
+
+def is_image_rate_limit_error(message: str) -> bool:
+    text = str(message or "").lower()
+    return "status=429" in text or "too many requests" in text
+
+
+IMAGE_POLICY_REFUSAL_MARKERS = (
+    "生成的图片可能违反",
+    "裸露、色情或情色内容",
+    "防护限制",
+    "违反了关于",
+    "violat",
+    "content policy",
+    "safety system",
+)
+
+
+def is_image_policy_refusal_message(message: str) -> bool:
+    text = str(message or "").strip().lower()
+    return bool(text) and any(marker in text for marker in IMAGE_POLICY_REFUSAL_MARKERS)
+
+
+def find_image_policy_refusal_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value if is_image_policy_refusal_message(value) else ""
+    if isinstance(value, list):
+        for item in value:
+            text = find_image_policy_refusal_text(item)
+            if text:
+                return text
+        return ""
+    if isinstance(value, dict):
+        for item in value.values():
+            text = find_image_policy_refusal_text(item)
+            if text:
+                return text
+    return ""
 
 
 def image_stream_error_message(message: str) -> str:
@@ -458,6 +496,13 @@ def iter_conversation_payloads(payloads: Iterator[str], history_text: str = "",
             yield conversation_base_event("conversation.event", state, raw=event)
             continue
         update_conversation_state(state, payload, event)
+        policy_text = find_image_policy_refusal_text(event)
+        if policy_text and policy_text != state.text:
+            state.blocked = True
+            delta = policy_text[len(state.text):] if policy_text.startswith(state.text) else policy_text
+            state.text = policy_text
+            yield conversation_base_event("conversation.delta", state, raw=event, delta=delta)
+            continue
         if history_index < len(history_messages) and event_assistant_text(event, history_text) == history_messages[history_index]:
             history_index += 1
             state.text = ""
@@ -466,6 +511,8 @@ def iter_conversation_payloads(payloads: Iterator[str], history_text: str = "",
         if next_text != state.text:
             delta = next_text[len(state.text):] if next_text.startswith(state.text) else next_text
             state.text = next_text
+            if is_image_policy_refusal_message(state.text):
+                state.blocked = True
             yield conversation_base_event("conversation.delta", state, raw=event, delta=delta)
             continue
         yield conversation_base_event("conversation.event", state, raw=event)
@@ -580,15 +627,22 @@ def stream_image_outputs(
         "tool_invoked": last.get("tool_invoked"),
         "turn_use_case": last.get("turn_use_case"),
     })
+    should_poll_for_image = bool(request.images) or last.get("turn_use_case") == "image gen"
     if message and not file_ids and not sediment_ids and last.get("blocked"):
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
         return
-    should_poll_for_image = bool(request.images) or last.get("turn_use_case") == "image gen"
+    if message and not file_ids and not sediment_ids and is_image_policy_refusal_message(message):
+        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
+        return
     if message and not file_ids and not sediment_ids and not should_poll_for_image:
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
         return
 
-    image_urls = backend.resolve_conversation_image_urls(conversation_id, file_ids, sediment_ids)
+    try:
+        image_urls = backend.resolve_conversation_image_urls(conversation_id, file_ids, sediment_ids)
+    except ImagePolicyRejectionError as exc:
+        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=str(exc))
+        return
     if image_urls:
         image_items = [
             {"b64_json": base64.b64encode(image_data).decode("ascii")}
@@ -616,9 +670,10 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
     emitted = False
     last_error = ""
     for index in range(1, request.n + 1):
+        deadline = time.monotonic() + account_service.image_acquire_timeout_secs()
         while True:
             try:
-                token = account_service.get_available_access_token()
+                token = account_service.get_available_access_token(deadline=deadline)
             except RuntimeError as exc:
                 if emitted:
                     return
@@ -647,15 +702,30 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     return
                 account_service.mark_image_result(token, True)
                 break
-            except ImagePollTimeoutError:
-                raise
-            except ImageGenerationError:
+            except ImageGenerationError as exc:
+                if is_image_rate_limit_error(str(exc)):
+                    account_service.mark_image_rate_limited(token, "image_stream")
+                    last_error = str(exc)
+                    continue
                 account_service.mark_image_result(token, False)
                 raise
+            except ImagePollTimeoutError as exc:
+                account_service.mark_image_result(token, False)
+                raise ImageGenerationError(
+                    str(exc),
+                    status_code=504,
+                    error_type="timeout_error",
+                    code="image_poll_timeout",
+                ) from exc
             except Exception as exc:
-                account_service.mark_image_result(token, False)
                 last_error = str(exc)
+                if is_image_rate_limit_error(last_error):
+                    account_service.mark_image_rate_limited(token, "image_stream")
+                else:
+                    account_service.mark_image_result(token, False)
                 logger.warning({"event": "image_stream_fail", "request_token": token, "error": last_error})
+                if is_image_rate_limit_error(last_error):
+                    continue
                 if not emitted_for_token and is_token_invalid_error(last_error):
                     account_service.remove_invalid_token(token, "image_stream")
                     continue
