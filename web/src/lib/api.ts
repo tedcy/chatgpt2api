@@ -219,13 +219,30 @@ export type ImageTask = {
   size?: string;
   created_at: string;
   updated_at: string;
+  started_at?: string;
+  finished_at?: string;
+  duration_ms?: number;
   data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
   error?: string;
+};
+
+export type ImageTaskSummary = {
+  queued_count: number;
+  running_count: number;
+  unfinished_count: number;
+  account_count: number;
+  available_account_count: number;
+  image_account_concurrency: number;
+  worker_capacity: number;
+  recent_sample_count: number;
+  recent_average_duration_ms: number | null;
+  estimated_processing_ms_per_account: number | null;
 };
 
 type ImageTaskListResponse = {
   items: ImageTask[];
   missing_ids: string[];
+  summary: ImageTaskSummary;
 };
 
 export type LoginResponse = {

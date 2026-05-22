@@ -24,6 +24,7 @@ import {
   fetchImageTasks,
   type Account,
   type ImageTask,
+  type ImageTaskSummary,
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import {
@@ -45,6 +46,19 @@ import {
 const ACTIVE_CONVERSATION_STORAGE_KEY = "chatgpt2api:image_active_conversation_id";
 const IMAGE_SIZE_STORAGE_KEY = "chatgpt2api:image_last_size";
 const IMAGE_COUNT_STORAGE_KEY = "chatgpt2api:image_last_count";
+
+const EMPTY_IMAGE_TASK_SUMMARY: ImageTaskSummary = {
+  queued_count: 0,
+  running_count: 0,
+  unfinished_count: 0,
+  account_count: 0,
+  available_account_count: 0,
+  image_account_concurrency: 1,
+  worker_capacity: 0,
+  recent_sample_count: 0,
+  recent_average_duration_ms: null,
+  estimated_processing_ms_per_account: null,
+};
 
 function clampImageCount(value: string) {
   return String(Math.min(100, Math.max(1, Math.floor(Number(value) || 1))));
@@ -354,6 +368,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [availableQuota, setAvailableQuota] = useState("加载中...");
+  const [imageTaskSummary, setImageTaskSummary] = useState<ImageTaskSummary>(EMPTY_IMAGE_TASK_SUMMARY);
   const [lightboxImages, setLightboxImages] = useState<ImageLightboxItem[]>([]);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
@@ -457,6 +472,15 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     }
   }, [isAdmin]);
 
+  const refreshImageTaskSummary = useCallback(async () => {
+    try {
+      const taskList = await fetchImageTasks([]);
+      setImageTaskSummary(taskList.summary ?? EMPTY_IMAGE_TASK_SUMMARY);
+    } catch {
+      setImageTaskSummary((current) => current);
+    }
+  }, []);
+
   useEffect(() => {
     if (didLoadQuotaRef.current) {
       return;
@@ -473,6 +497,16 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       window.removeEventListener("focus", handleFocus);
     };
   }, [isAdmin, loadQuota]);
+
+  useEffect(() => {
+    void refreshImageTaskSummary();
+    const timer = window.setInterval(() => {
+      void refreshImageTaskSummary();
+    }, 5000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [refreshImageTaskSummary]);
 
   useEffect(() => {
     if (!selectedConversation) {
@@ -909,6 +943,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
           await sleep(2000);
           const taskList = await fetchImageTasks(loadingTaskIds);
+          setImageTaskSummary(taskList.summary ?? EMPTY_IMAGE_TASK_SUMMARY);
           if (taskList.items.length > 0) {
             await applyTasks(taskList.items);
           }
@@ -1226,6 +1261,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             imageSize={imageSize}
             availableQuota={availableQuota}
             activeTaskCount={activeTaskCount}
+            imageTaskSummary={imageTaskSummary}
             referenceImages={referenceImages}
             textareaRef={textareaRef}
             fileInputRef={fileInputRef}

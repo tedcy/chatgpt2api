@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import type { ImageTaskSummary } from "@/lib/api";
 
 type ImageComposerProps = {
   prompt: string;
@@ -14,6 +15,7 @@ type ImageComposerProps = {
   imageSize: string;
   availableQuota: string;
   activeTaskCount: number;
+  imageTaskSummary: ImageTaskSummary;
   referenceImages: Array<{ name: string; dataUrl: string }>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   fileInputRef: RefObject<HTMLInputElement | null>;
@@ -32,6 +34,7 @@ export function ImageComposer({
   imageSize,
   availableQuota,
   activeTaskCount,
+  imageTaskSummary,
   referenceImages,
   textareaRef,
   fileInputRef,
@@ -62,6 +65,9 @@ export function ImageComposer({
     { value: "9:16", label: "9:16 (竖版)" },
   ];
   const imageSizeLabel = imageSizeOptions.find((option) => option.value === imageSize)?.label || "未指定";
+  const backendTaskCount = imageTaskSummary.unfinished_count || activeTaskCount;
+  const averageDurationLabel = formatDuration(imageTaskSummary.recent_average_duration_ms);
+  const estimatedDurationLabel = formatDuration(imageTaskSummary.estimated_processing_ms_per_account);
 
   useEffect(() => {
     if (!isSizeMenuOpen) {
@@ -186,12 +192,30 @@ export function ImageComposer({
                   <div className="shrink-0 rounded-full bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-600 sm:px-3 sm:py-2 sm:text-xs">
                     <span className="hidden sm:inline">剩余额度 </span>{availableQuota}
                   </div>
-                  {activeTaskCount > 0 && (
+                  {backendTaskCount > 0 && (
                     <div className="flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-700 sm:gap-1.5 sm:px-3 sm:py-2 sm:text-xs">
                       <LoaderCircle className="size-3 animate-spin" />
-                      {activeTaskCount}<span className="hidden sm:inline"> 个任务处理中</span>
+                      {backendTaskCount}<span className="hidden sm:inline"> 个任务处理中</span>
                     </div>
                   )}
+                  {(imageTaskSummary.queued_count > 0 || imageTaskSummary.running_count > 0) && (
+                    <div className="flex shrink-0 items-center gap-1.5 rounded-full bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-600 sm:px-3 sm:py-2 sm:text-xs">
+                      <span>排队 {imageTaskSummary.queued_count}</span>
+                      <span className="text-stone-300">/</span>
+                      <span>运行 {imageTaskSummary.running_count}</span>
+                    </div>
+                  )}
+                  {averageDurationLabel ? (
+                    <div className="flex shrink-0 items-center gap-1.5 rounded-full bg-blue-50 px-2 py-1 text-[10px] font-medium text-blue-700 sm:px-3 sm:py-2 sm:text-xs">
+                      <span>单张均耗 {averageDurationLabel}</span>
+                      {estimatedDurationLabel ? (
+                        <>
+                          <span className="text-blue-300">/</span>
+                          <span>每号预计 {estimatedDurationLabel}</span>
+                        </>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <div className="flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-stone-200 bg-white px-2 py-0.5 sm:h-auto sm:gap-2 sm:px-3 sm:py-1">
                     <span className="hidden text-[11px] font-medium text-stone-700 sm:inline sm:text-sm">张数</span>
                     <Input
@@ -280,3 +304,20 @@ export function ImageComposer({
   );
 }
 
+function formatDuration(value?: number | null) {
+  if (!value || value <= 0) {
+    return "";
+  }
+  const totalSeconds = Math.max(1, Math.round(value / 1000));
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) {
+    return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
