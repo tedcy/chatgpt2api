@@ -21,6 +21,9 @@ from utils.helper import anthropic_sse_stream, sse_json_stream
 LOG_TYPE_CALL = "call"
 LOG_TYPE_ACCOUNT = "account"
 LOG_TYPE_POLL = "poll"
+NOISY_POLL_EVENTS = {"image_poll_start", "image_poll_initial_wait", "image_poll_wait"}
+NOISY_POLL_SUMMARIES = {"图片轮询开始", "图片轮询初始等待", "图片轮询等待"}
+IMAGE_ENDPOINTS = {"/v1/images/generations", "/v1/images/edits"}
 
 
 class LogService:
@@ -54,6 +57,22 @@ class LogService:
         day = t[:10]
         if type and item.get("type") != type:
             return False
+        if item.get("type") == LOG_TYPE_CALL:
+            detail = item.get("detail")
+            if isinstance(detail, dict):
+                is_empty_image_success = (
+                    detail.get("endpoint") in IMAGE_ENDPOINTS
+                    and detail.get("status") == "success"
+                    and detail.get("duration_ms") == 0
+                    and not detail.get("urls")
+                )
+                if is_empty_image_success:
+                    return False
+        if item.get("type") == LOG_TYPE_POLL:
+            detail = item.get("detail")
+            event = detail.get("event") if isinstance(detail, dict) else ""
+            if event in NOISY_POLL_EVENTS or item.get("summary") in NOISY_POLL_SUMMARIES:
+                return False
         if start_date and day < start_date:
             return False
         if end_date and day > end_date:
@@ -86,6 +105,36 @@ class LogService:
             if len(items) >= limit:
                 break
         return items
+
+    def list_page(
+        self,
+        type: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        page: int | str = 1,
+        page_size: int | str = 10,
+    ) -> dict[str, Any]:
+        normalized_page = _normalize_page(page)
+        normalized_page_size = _normalize_page_size(page_size)
+        offset = (normalized_page - 1) * normalized_page_size
+        if not self.path.exists():
+            return {"items": [], "total": 0, "page": 1, "page_size": normalized_page_size}
+        items: list[dict[str, Any]] = []
+        total = 0
+        lines = self.path.read_text(encoding="utf-8").splitlines()
+        for line_number in range(len(lines) - 1, -1, -1):
+            item = self._parse_line(lines[line_number], line_number)
+            if item is None:
+                continue
+            if not self._matches_filters(item, type=type, start_date=start_date, end_date=end_date):
+                continue
+            if offset <= total < offset + normalized_page_size:
+                items.append(item)
+            total += 1
+        page_count = max(1, (total + normalized_page_size - 1) // normalized_page_size)
+        if total and normalized_page > page_count:
+            return self.list_page(type=type, start_date=start_date, end_date=end_date, page=page_count, page_size=normalized_page_size)
+        return {"items": items, "total": total, "page": min(normalized_page, page_count), "page_size": normalized_page_size}
 
     def delete(self, ids: list[str]) -> dict[str, int]:
         target_ids = {str(item or "").strip() for item in ids if str(item or "").strip()}
@@ -137,6 +186,20 @@ def _request_excerpt(text: object, limit: int = 1000) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[: limit - 1].rstrip() + "…"
+
+
+def _normalize_page(value: int | str, default: int = 1) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_page_size(value: int | str, default: int = 10) -> int:
+    try:
+        return min(100, max(1, int(value)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _image_error_response(exc: Exception) -> JSONResponse:
@@ -249,7 +312,7 @@ class LoggedCall:
         if request_excerpt:
             detail["request_text"] = request_excerpt
         if error:
-            detail["error"] = error
+            detail["error"] = _request_excerpt(error, 1000)
         collected_urls = [*(urls or []), *_collect_urls(result)]
         if collected_urls:
             detail["urls"] = list(dict.fromkeys(collected_urls))

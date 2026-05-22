@@ -113,21 +113,47 @@ def get_image_download_response(relative_path: str) -> FileResponse:
 
 def cleanup_image_thumbnails() -> int:
     thumbnails_root = config.image_thumbnails_dir
+    known_paths = image_storage_service.known_paths(refresh_local=True)
     removed = 0
     for path in thumbnails_root.rglob("*"):
         if not path.is_file():
             continue
         rel = path.relative_to(thumbnails_root).as_posix()
-        if not rel.endswith(".png") or not image_storage_service.exists(rel[:-4]):
+        if not rel.endswith(".png") or rel[:-4] not in known_paths:
             path.unlink()
             removed += 1
     _cleanup_empty_dirs(thumbnails_root)
     return removed
 
-def list_images(base_url: str, start_date: str = "", end_date: str = "") -> dict[str, object]:
-    config.cleanup_old_images()
-    cleanup_image_thumbnails()
+def _normalize_page(value: int | str, default: int = 1) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_page_size(value: int | str, default: int = 12) -> int:
+    try:
+        return min(100, max(1, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def list_images(
+    base_url: str,
+    start_date: str = "",
+    end_date: str = "",
+    *,
+    page: int | str = 1,
+    page_size: int | str = 12,
+    tags: list[str] | None = None,
+    refresh: bool = False,
+) -> dict[str, object]:
+    if refresh:
+        config.cleanup_old_images()
+        cleanup_image_thumbnails()
     all_tags = load_tags()
+    selected_tags = [tag for tag in (tags or []) if tag]
     items = [
         {
             **item,
@@ -135,20 +161,47 @@ def list_images(base_url: str, start_date: str = "", end_date: str = "") -> dict
             "thumbnail_url": thumbnail_url(base_url, str(item["path"])),
             "tags": all_tags.get(str(item["path"]), []),
         }
-        for item in image_storage_service.list_items(base_url, start_date, end_date)
+        for item in image_storage_service.list_items(base_url, start_date, end_date, refresh=refresh)
     ]
+    if selected_tags:
+        items = [item for item in items if all(tag in item.get("tags", []) for tag in selected_tags)]
+    total = len(items)
+    normalized_page_size = _normalize_page_size(page_size)
+    page_count = max(1, (total + normalized_page_size - 1) // normalized_page_size)
+    normalized_page = min(_normalize_page(page), page_count)
+    start = (normalized_page - 1) * normalized_page_size
+    paged_items = items[start:start + normalized_page_size]
     groups: dict[str, list[dict[str, object]]] = {}
-    for item in items:
+    for item in paged_items:
         groups.setdefault(str(item["date"]), []).append(item)
-    return {"items": items, "groups": [{"date": key, "items": value} for key, value in groups.items()]}
+    return {
+        "items": paged_items,
+        "groups": [{"date": key, "items": value} for key, value in groups.items()],
+        "total": total,
+        "page": normalized_page,
+        "page_size": normalized_page_size,
+    }
 
 
-def delete_images(paths: list[str] | None = None, start_date: str = "", end_date: str = "", all_matching: bool = False) -> dict[str, int]:
+def delete_images(
+    paths: list[str] | None = None,
+    start_date: str = "",
+    end_date: str = "",
+    all_matching: bool = False,
+    tags: list[str] | None = None,
+) -> dict[str, int]:
     root = config.images_dir.resolve()
-    targets = [
-        str(item["path"])
-        for item in image_storage_service.list_items("", start_date=start_date, end_date=end_date)
-    ] if all_matching else (paths or [])
+    if all_matching:
+        all_tags = load_tags()
+        selected_tags = [tag for tag in (tags or []) if tag]
+        targets = []
+        for item in image_storage_service.list_items("", start_date=start_date, end_date=end_date):
+            rel = str(item["path"])
+            if selected_tags and not all(tag in all_tags.get(rel, []) for tag in selected_tags):
+                continue
+            targets.append(rel)
+    else:
+        targets = paths or []
     removed = 0
     for item in targets:
         path = (root / item).resolve()

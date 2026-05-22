@@ -268,35 +268,51 @@ class ImageStorageService:
         safe_rel = _safe_relative_path(rel)
         return _is_image_rel(safe_rel) and _local_image_path(safe_rel).is_file()
 
-    def list_items(self, base_url: str, start_date: str = "", end_date: str = "") -> list[dict[str, object]]:
+    def known_paths(self, *, refresh_local: bool = False) -> set[str]:
+        with self._index_lock:
+            indexed = self._load_clean_index()
+            paths = {
+                rel
+                for rel, item in indexed.items()
+                if bool(item.get("webdav")) or bool(item.get("local", not item.get("webdav")))
+            }
+            if refresh_local:
+                root = config.images_dir
+                for path in root.rglob("*"):
+                    if path.is_file() and _is_image_rel(path.name):
+                        paths.add(path.relative_to(root).as_posix())
+            return paths
+
+    def list_items(self, base_url: str, start_date: str = "", end_date: str = "", *, refresh: bool = True) -> list[dict[str, object]]:
         with self._index_lock:
             indexed = self._load_clean_index()
             root = config.images_dir
             changed = False
-            for path in root.rglob("*"):
-                if not path.is_file() or not _is_image_rel(path.name):
-                    continue
-                rel = path.relative_to(root).as_posix()
-                if rel in indexed:
-                    continue
-                dimensions = None
-                try:
-                    dimensions = _image_dimensions(path.read_bytes())
-                except Exception:
+            if refresh:
+                for path in root.rglob("*"):
+                    if not path.is_file() or not _is_image_rel(path.name):
+                        continue
+                    rel = path.relative_to(root).as_posix()
+                    if rel in indexed:
+                        continue
                     dimensions = None
-                indexed[rel] = {
-                    "rel": rel,
-                    "path": rel,
-                    "name": path.name,
-                    "date": "-".join(rel.split("/")[:3]) if len(rel.split("/")) >= 4 else datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d"),
-                    "size": path.stat().st_size,
-                    "created_at": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-                    "storage": "local",
-                    "local": True,
-                    "webdav": False,
-                    **({"width": dimensions[0], "height": dimensions[1]} if dimensions else {}),
-                }
-                changed = True
+                    try:
+                        dimensions = _image_dimensions(path.read_bytes())
+                    except Exception:
+                        dimensions = None
+                    indexed[rel] = {
+                        "rel": rel,
+                        "path": rel,
+                        "name": path.name,
+                        "date": "-".join(rel.split("/")[:3]) if len(rel.split("/")) >= 4 else datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d"),
+                        "size": path.stat().st_size,
+                        "created_at": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                        "storage": "local",
+                        "local": True,
+                        "webdav": False,
+                        **({"width": dimensions[0], "height": dimensions[1]} if dimensions else {}),
+                    }
+                    changed = True
 
             items: list[dict[str, object]] = []
             for rel, item in list(indexed.items()):
@@ -304,11 +320,12 @@ class ImageStorageService:
                     indexed.pop(rel, None)
                     changed = True
                     continue
-                local = _local_image_path(rel).is_file()
+                local = _local_image_path(rel).is_file() if refresh else bool(item.get("local", not item.get("webdav")))
                 webdav = bool(item.get("webdav"))
                 if not local and not webdav:
-                    indexed.pop(rel, None)
-                    changed = True
+                    if refresh:
+                        indexed.pop(rel, None)
+                        changed = True
                     continue
                 storage = "both" if local and webdav else ("webdav" if webdav else "local")
                 if item.get("local") != local or item.get("storage") != storage:

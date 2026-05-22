@@ -45,6 +45,13 @@ def _clean(value: object, default: str = "") -> str:
     return str(value or default).strip()
 
 
+def _excerpt(value: object, limit: int = 1000) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
 def _owner_id(identity: dict[str, object]) -> str:
     return _clean(identity.get("id")) or "anonymous"
 
@@ -407,7 +414,7 @@ class ImageTaskService:
         if request_preview:
             detail["request_text"] = request_preview
         if error:
-            detail["error"] = error
+            detail["error"] = _excerpt(error)
         if urls:
             detail["urls"] = list(dict.fromkeys(urls))
         try:

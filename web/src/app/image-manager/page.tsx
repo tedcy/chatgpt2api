@@ -68,6 +68,7 @@ function useLongPress(onLongPress: () => void, ms = LONG_PRESS_MS) {
 
 function ImageManagerContent() {
   const [items, setItems] = useState<ManagedImage[]>([]);
+  const [totalItems, setTotalItems] = useState(0);
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [lightboxIndex, setLightboxIndex] = useState(0);
@@ -86,36 +87,39 @@ function ImageManagerContent() {
   const [deleteMode, setDeleteMode] = useState<"selected" | "filtered" | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
 
-  const filteredItems = selectedTags.length > 0
-    ? items.filter((item) => selectedTags.every((t) => (item.tags ?? []).includes(t)))
-    : items;
-
-  const lightboxImages = filteredItems.map((item) => ({
+  const lightboxImages = items.map((item) => ({
     id: item.name,
     src: item.url,
     sizeLabel: formatSize(item.size),
     dimensions: item.width && item.height ? `${item.width} x ${item.height}` : undefined,
   }));
   const pageSize = 12;
-  const pageCount = Math.max(1, Math.ceil(filteredItems.length / pageSize));
+  const pageCount = Math.max(1, Math.ceil(totalItems / pageSize));
   const safePage = Math.min(page, pageCount);
-  const currentRows = filteredItems.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const currentRows = items;
   const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
-  const selectedCount = deleteMode === "filtered" ? items.length : selectedPaths.length;
+  const selectedCount = deleteMode === "filtered" ? totalItems : selectedPaths.length;
   const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(imageKey(item)));
-  const allSelected = filteredItems.length > 0 && filteredItems.every((item) => selectedSet.has(imageKey(item)));
 
-  const loadImages = async () => {
+  const loadImages = async (options: { refresh?: boolean; nextPage?: number } = {}) => {
     setIsLoading(true);
     try {
+      const nextPage = options.nextPage ?? page;
       const [data, tagsData] = await Promise.all([
-        fetchManagedImages({ start_date: startDate, end_date: endDate }),
+        fetchManagedImages({
+          start_date: startDate,
+          end_date: endDate,
+          page: nextPage,
+          page_size: pageSize,
+          tags: selectedTags,
+          refresh: options.refresh,
+        }),
         fetchImageTags(),
       ]);
       setItems(data.items);
+      setTotalItems(data.total);
       setAllTags(tagsData.tags);
-      setSelectedPaths((current) => current.filter((path) => data.items.some((item) => imageKey(item) === path)));
-      setPage(1);
+      setPage(data.page);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载图片失败");
     } finally {
@@ -140,6 +144,7 @@ function ImageManagerContent() {
     try {
       await deleteManagedImages({ paths: [deleteTarget.rel] });
       setItems((prev) => prev.filter((item) => item.rel !== deleteTarget.rel));
+      setTotalItems((prev) => Math.max(0, prev - 1));
       setSelectedPaths((prev) => prev.filter((p) => p !== imageKey(deleteTarget)));
       toast.success("图片已删除");
     } catch (error) {
@@ -221,6 +226,7 @@ function ImageManagerContent() {
     setStartDate("");
     setEndDate("");
     setSelectedTags([]);
+    setPage(1);
   };
 
   const togglePaths = (paths: string[], checked: boolean) => {
@@ -231,11 +237,13 @@ function ImageManagerContent() {
     if (!deleteMode || selectedCount === 0) return;
     setIsDeleting(true);
     try {
-      const data = await deleteManagedImages(deleteMode === "filtered" ? { start_date: startDate, end_date: endDate, all_matching: true } : { paths: selectedPaths });
+      const data = await deleteManagedImages(deleteMode === "filtered"
+        ? { start_date: startDate, end_date: endDate, all_matching: true, tags: selectedTags }
+        : { paths: selectedPaths });
       toast.success(`已删除 ${data.removed} 张图片`);
       setDeleteMode(null);
       setSelectedPaths([]);
-      await loadImages();
+      await loadImages({ refresh: true });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "删除图片失败");
     } finally {
@@ -263,7 +271,7 @@ function ImageManagerContent() {
 
   useEffect(() => {
     void loadImages();
-  }, [startDate, endDate]);
+  }, [page, startDate, endDate, selectedTags.join(",")]);
 
   return (
     <section className="space-y-5">
@@ -273,7 +281,7 @@ function ImageManagerContent() {
           <h1 className="text-2xl font-semibold tracking-tight">图片管理</h1>
         </div>
         <div className="flex flex-wrap gap-2">
-          <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
+          <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); setPage(1); }} />
           <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700">
             清除筛选条件
           </Button>
@@ -281,9 +289,9 @@ function ImageManagerContent() {
             {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
             查询
           </Button>
-          <Button variant="outline" onClick={() => setDeleteMode("filtered")} disabled={isDeleting || items.length === 0 || (!startDate && !endDate)} className="h-10 rounded-xl border-rose-200 bg-white px-4 text-rose-600 hover:bg-rose-50">
+          <Button variant="outline" onClick={() => setDeleteMode("filtered")} disabled={isDeleting || totalItems === 0 || (!startDate && !endDate && selectedTags.length === 0)} className="h-10 rounded-xl border-rose-200 bg-white px-4 text-rose-600 hover:bg-rose-50">
             <Trash2 className="size-4" />
-            删除匹配日期
+            删除匹配条件
           </Button>
         </div>
       </div>
@@ -326,7 +334,7 @@ function ImageManagerContent() {
             );
           })}
           {selectedTags.length > 0 ? (
-            <button type="button" onClick={() => setSelectedTags([])}>
+            <button type="button" onClick={() => { setSelectedTags([]); setPage(1); }}>
               <Badge variant="secondary" className="cursor-pointer rounded-md">
                 <X className="mr-0.5 size-3" />
                 清除
@@ -341,20 +349,15 @@ function ImageManagerContent() {
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-5 py-4">
             <div className="flex flex-wrap items-center gap-3 text-sm text-stone-600">
               <ImageIcon className="size-4" />
-              共 {filteredItems.length} 张
-              {selectedTags.length > 0 ? <span className="text-stone-400">（筛选自 {items.length} 张）</span> : null}
+              共 {totalItems} 张
               <label className="flex items-center gap-2">
                 <Checkbox checked={currentPageSelected} onCheckedChange={(checked) => togglePaths(currentRows.map(imageKey), Boolean(checked))} />
                 本页全选
               </label>
-              <label className="flex items-center gap-2">
-                <Checkbox checked={allSelected} onCheckedChange={(checked) => togglePaths(filteredItems.map(imageKey), Boolean(checked))} />
-                全选结果
-              </label>
               {selectedPaths.length > 0 ? <span>已选 {selectedPaths.length} 张</span> : null}
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-500" onClick={() => void loadImages()} disabled={isLoading}>
+              <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-500" onClick={() => void loadImages({ refresh: true })} disabled={isLoading}>
                 <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
                 刷新
               </Button>
@@ -373,7 +376,7 @@ function ImageManagerContent() {
           </div>
           <div className="grid gap-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {currentRows.map((item) => {
-              const imageIndex = filteredItems.findIndex((row) => row.url === item.url);
+              const imageIndex = items.findIndex((row) => row.url === item.url);
               const storage = storageBadge(item);
               return (
               <div key={item.rel} className="group border-r border-b border-stone-100 p-4 transition hover:bg-stone-50">
@@ -529,7 +532,7 @@ function ImageManagerContent() {
             )})}
           </div>
           <div className="flex items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
-            <span>第 {safePage} / {pageCount} 页，共 {filteredItems.length} 张</span>
+            <span>第 {safePage} / {pageCount} 页，共 {totalItems} 张</span>
             <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
               <ChevronLeft className="size-4" />
             </Button>
@@ -537,7 +540,7 @@ function ImageManagerContent() {
               <ChevronRight className="size-4" />
             </Button>
           </div>
-          {!isLoading && filteredItems.length === 0 ? <div className="px-6 py-14 text-center text-sm text-stone-500">没有找到图片</div> : null}
+          {!isLoading && totalItems === 0 ? <div className="px-6 py-14 text-center text-sm text-stone-500">没有找到图片</div> : null}
         </CardContent>
       </Card>
 
@@ -586,7 +589,7 @@ function ImageManagerContent() {
       <Dialog open={Boolean(deleteMode)} onOpenChange={(open) => (!open ? setDeleteMode(null) : null)}>
         <DialogContent showCloseButton={false} className="rounded-2xl p-6">
           <DialogHeader className="gap-2">
-            <DialogTitle>{deleteMode === "filtered" ? "删除匹配日期的图片" : "删除所选图片"}</DialogTitle>
+            <DialogTitle>{deleteMode === "filtered" ? "删除匹配条件的图片" : "删除所选图片"}</DialogTitle>
           </DialogHeader>
           <p className="text-sm text-stone-600">
             确认删除 {selectedCount} 张图片吗？删除后无法恢复。

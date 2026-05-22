@@ -36,7 +36,9 @@ function getDetailText(item: SystemLog, key: string) {
 
 function formatDuration(item: SystemLog) {
   const value = item.detail?.duration_ms;
-  return typeof value === "number" ? `${(value / 1000).toFixed(2)} s` : "-";
+  if (typeof value !== "number") return "-";
+  if (value < 1000) return `${Math.max(0, Math.round(value))} ms`;
+  return `${(value / 1000).toFixed(2)} s`;
 }
 
 function getUrls(item: SystemLog | null) {
@@ -53,6 +55,7 @@ function getStatus(item: SystemLog) {
 
 function LogsContent() {
   const [items, setItems] = useState<SystemLog[]>([]);
+  const [totalItems, setTotalItems] = useState(0);
   const [type, setType] = useState<string>(LogType.Call);
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -70,20 +73,20 @@ function LogsContent() {
   const isCallLog = type === LogType.Call;
   const isPollLog = type === LogType.Poll;
   const pageSize = 10;
-  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  const pageCount = Math.max(1, Math.ceil(totalItems / pageSize));
   const safePage = Math.min(page, pageCount);
-  const currentRows = items.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const currentRows = items;
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(item.id));
-  const allSelected = items.length > 0 && items.every((item) => selectedSet.has(item.id));
 
   const loadLogs = async () => {
     setIsLoading(true);
     try {
-      const data = await fetchSystemLogs({ type, start_date: startDate, end_date: endDate });
+      const data = await fetchSystemLogs({ type, start_date: startDate, end_date: endDate, page, page_size: pageSize });
       setItems(data.items);
+      setTotalItems(data.total);
       setSelectedIds((current) => current.filter((id) => data.items.some((item) => item.id === id)));
-      setPage(1);
+      setPage(data.page);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载日志失败");
     } finally {
@@ -94,6 +97,7 @@ function LogsContent() {
   const clearFilters = () => {
     setStartDate("");
     setEndDate("");
+    setPage(1);
   };
 
   const openDetail = (item: SystemLog) => {
@@ -134,7 +138,7 @@ function LogsContent() {
 
   useEffect(() => {
     void loadLogs();
-  }, [type, startDate, endDate]);
+  }, [type, startDate, endDate, page]);
 
   return (
     <section className="space-y-5">
@@ -144,7 +148,7 @@ function LogsContent() {
           <h1 className="text-2xl font-semibold tracking-tight">日志管理</h1>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Select value={type} onValueChange={setType}>
+          <Select value={type} onValueChange={(value) => { setType(value); setPage(1); }}>
             <SelectTrigger className="h-10 w-[150px] rounded-xl border-stone-200 bg-white"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value={LogType.Call}>调用日志</SelectItem>
@@ -152,7 +156,7 @@ function LogsContent() {
               <SelectItem value={LogType.Poll}>轮询日志</SelectItem>
             </SelectContent>
           </Select>
-          <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
+          <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); setPage(1); }} />
           <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700">
             清除筛选条件
           </Button>
@@ -167,14 +171,10 @@ function LogsContent() {
         <CardContent className="p-0">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-5 py-4">
             <div className="flex flex-wrap items-center gap-3 text-sm text-stone-600">
-              <span>共 {items.length} 条</span>
+              <span>共 {totalItems} 条</span>
               <label className="flex items-center gap-2">
                 <Checkbox checked={currentPageSelected} onCheckedChange={(checked) => toggleIds(currentRows.map((item) => item.id), Boolean(checked))} />
                 本页全选
-              </label>
-              <label className="flex items-center gap-2">
-                <Checkbox checked={allSelected} onCheckedChange={(checked) => toggleIds(items.map((item) => item.id), Boolean(checked))} />
-                全选结果
               </label>
               {selectedIds.length > 0 ? <span>已选 {selectedIds.length} 条</span> : null}
             </div>
@@ -278,7 +278,7 @@ function LogsContent() {
             </Table>
           </div>
           <div className="flex items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
-            <span>第 {safePage} / {pageCount} 页，共 {items.length} 条</span>
+            <span>第 {safePage} / {pageCount} 页，共 {totalItems} 条</span>
             <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
               <ChevronLeft className="size-4" />
             </Button>
@@ -286,7 +286,7 @@ function LogsContent() {
               <ChevronRight className="size-4" />
             </Button>
           </div>
-          {!isLoading && items.length === 0 ? <div className="px-6 py-14 text-center text-sm text-stone-500">没有找到日志</div> : null}
+          {!isLoading && totalItems === 0 ? <div className="px-6 py-14 text-center text-sm text-stone-500">没有找到日志</div> : null}
         </CardContent>
       </Card>
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>

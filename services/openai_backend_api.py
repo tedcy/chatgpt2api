@@ -750,6 +750,8 @@ class OpenAIBackendAPI:
 
     @staticmethod
     def _log_image_poll(summary: str, detail: dict[str, Any]) -> None:
+        if detail.get("event") in {"image_poll_start", "image_poll_initial_wait", "image_poll_wait"}:
+            return
         try:
             log_service.add(LOG_TYPE_POLL, summary, detail)
         except Exception:
