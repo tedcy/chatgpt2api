@@ -25,6 +25,7 @@ export function ConfigCard() {
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
+  const setImagePollInitialWaitSecs = useSettingsStore((state) => state.setImagePollInitialWaitSecs);
   const setImagePollIntervalSecs = useSettingsStore((state) => state.setImagePollIntervalSecs);
   const setImagePollRateLimitRetrySecs = useSettingsStore((state) => state.setImagePollRateLimitRetrySecs);
   const setImageRateLimitCooldownSecs = useSettingsStore((state) => state.setImageRateLimitCooldownSecs);
@@ -169,13 +170,25 @@ export function ConfigCard() {
             <p className="text-xs text-stone-500">单位秒，等待上游图片结果的最长时间。</p>
           </div>
           <div className="space-y-2">
+            <label className="text-sm text-stone-700">图片轮询初始等待</label>
+            <Input
+              type="number"
+              min={0}
+              value={String(config?.image_poll_initial_wait_secs ?? "")}
+              onChange={(event) => setImagePollInitialWaitSecs(event.target.value)}
+              placeholder="10"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位秒，SSE 结束后首次查询结果前的等待时间。</p>
+          </div>
+          <div className="space-y-2">
             <label className="text-sm text-stone-700">图片普通轮询间隔</label>
             <Input
               type="number"
               min={1}
               value={String(config?.image_poll_interval_secs || "")}
               onChange={(event) => setImagePollIntervalSecs(event.target.value)}
-              placeholder="4"
+              placeholder="10"
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
             <p className="text-xs text-stone-500">单位秒，未拿到图片结果时的基础等待时间。</p>

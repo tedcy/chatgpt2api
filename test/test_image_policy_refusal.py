@@ -118,6 +118,7 @@ class ImagePolicyRefusalTests(unittest.TestCase):
 
     def test_poll_wait_uses_configured_interval_plus_jitter(self):
         self.patch_config({
+            "image_poll_initial_wait_secs": 0,
             "image_poll_interval_secs": 7,
             "image_poll_jitter_min_secs": 2,
             "image_poll_jitter_max_secs": 4,
@@ -137,6 +138,7 @@ class ImagePolicyRefusalTests(unittest.TestCase):
 
     def test_poll_429_wait_uses_configured_retry_interval_plus_jitter(self):
         self.patch_config({
+            "image_poll_initial_wait_secs": 0,
             "image_poll_rate_limit_retry_secs": 11,
             "image_poll_jitter_min_secs": 1,
             "image_poll_jitter_max_secs": 5,
