@@ -135,7 +135,59 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertEqual(second["id"], "task-1")
             task = wait_for_task(service, OWNER, "task-1", "success")
             self.assertEqual(task["data"][0]["url"], "http://example.test/image.png")
+            self.assertIn("started_at", task)
+            self.assertIn("finished_at", task)
+            self.assertIsInstance(task.get("duration_ms"), int)
             self.assertEqual(calls, 1)
+
+    def test_list_tasks_includes_queue_runtime_summary(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            def handler(payload):
+                time.sleep(0.1)
+                return {"data": [{"url": f"http://example.test/{payload['prompt']}.png"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service._task_worker_limit = lambda: 1  # type: ignore[method-assign]
+            service._task_next_interval_delay = lambda: (0.0, 0.0, 0.0)  # type: ignore[method-assign]
+
+            with patch(
+                "services.image_task_service.account_service.image_runtime_summary",
+                return_value={
+                    "account_count": 3,
+                    "available_account_count": 2,
+                    "image_account_concurrency": 1,
+                    "worker_capacity": 2,
+                    "recent_sample_count": 2,
+                    "recent_average_duration_ms": 10000,
+                },
+            ):
+                service.submit_generation(
+                    OWNER,
+                    client_task_id="task-1",
+                    prompt="cat",
+                    model="gpt-image-2",
+                    size=None,
+                    base_url="http://local.test",
+                )
+                service.submit_generation(
+                    OWNER,
+                    client_task_id="task-2",
+                    prompt="dog",
+                    model="gpt-image-2",
+                    size=None,
+                    base_url="http://local.test",
+                )
+
+                result = service.list_tasks(OWNER, [])
+                wait_for_task(service, OWNER, "task-1", "success")
+                wait_for_task(service, OWNER, "task-2", "success")
+
+            summary = result["summary"]
+            self.assertEqual(summary["queued_count"], 1)
+            self.assertEqual(summary["running_count"], 1)
+            self.assertEqual(summary["unfinished_count"], 2)
+            self.assertEqual(summary["recent_average_duration_ms"], 10000)
+            self.assertEqual(summary["estimated_processing_ms_per_account"], 10000)
 
     def test_queued_tasks_obey_worker_limit(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -155,6 +207,7 @@ class ImageTaskServiceTests(unittest.TestCase):
 
             service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
             service._task_worker_limit = lambda: 1  # type: ignore[method-assign]
+            service._task_next_interval_delay = lambda: (0.0, 0.0, 0.0)  # type: ignore[method-assign]
 
             service.submit_generation(
                 OWNER,

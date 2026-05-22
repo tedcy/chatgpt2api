@@ -681,6 +681,7 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     return
                 raise ImageGenerationError(str(exc) or "image generation failed") from exc
 
+            token_started = time.monotonic()
             emitted_for_token = False
             returned_message = False
             returned_result = False
@@ -702,7 +703,11 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                 if returned_message or not returned_result:
                     account_service.mark_image_result(token, False)
                     return
-                account_service.mark_image_result(token, True)
+                account_service.mark_image_result(
+                    token,
+                    True,
+                    duration_ms=int((time.monotonic() - token_started) * 1000),
+                )
                 break
             except ImageGenerationError as exc:
                 if is_image_rate_limit_error(str(exc)):

@@ -134,6 +134,8 @@ class AccountService:
         normalized["default_model_slug"] = normalized.get("default_model_slug") or None
         normalized["restore_at"] = normalized.get("restore_at") or None
         normalized["image_cooldown_until"] = normalized.get("image_cooldown_until") or None
+        normalized["last_image_duration_ms"] = max(0, int(normalized.get("last_image_duration_ms") or 0))
+        normalized["last_image_duration_at"] = normalized.get("last_image_duration_at") or None
         normalized["success"] = int(normalized.get("success") or 0)
         normalized["fail"] = int(normalized.get("fail") or 0)
         normalized["last_used_at"] = normalized.get("last_used_at")
@@ -371,6 +373,29 @@ class AccountService:
         with self._lock:
             return [dict(item) for item in self._accounts.values()]
 
+    def image_runtime_summary(self) -> dict[str, object]:
+        with self._lock:
+            accounts = [dict(item) for item in self._accounts.values()]
+            try:
+                per_account = max(1, int(config.image_account_concurrency or 1))
+            except Exception:
+                per_account = 1
+            durations = [
+                int(account.get("last_image_duration_ms") or 0)
+                for account in accounts
+                if int(account.get("last_image_duration_ms") or 0) > 0
+            ]
+            available_accounts = sum(1 for account in accounts if self._is_image_account_available(account))
+            average_duration_ms = int(sum(durations) / len(durations)) if durations else None
+            return {
+                "account_count": len(accounts),
+                "available_account_count": available_accounts,
+                "image_account_concurrency": per_account,
+                "worker_capacity": available_accounts * per_account,
+                "recent_sample_count": len(durations),
+                "recent_average_duration_ms": average_duration_ms,
+            }
+
     def list_limited_tokens(self) -> list[str]:
         with self._lock:
             return [
@@ -498,7 +523,7 @@ class AccountService:
             return dict(account)
         return None
 
-    def mark_image_result(self, access_token: str, success: bool) -> dict | None:
+    def mark_image_result(self, access_token: str, success: bool, duration_ms: int | None = None) -> dict | None:
         if not access_token:
             return None
         self.release_image_slot(access_token)
@@ -507,10 +532,14 @@ class AccountService:
             if current is None:
                 return None
             next_item = dict(current)
-            next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            next_item["last_used_at"] = now_text
             image_quota_unknown = bool(next_item.get("image_quota_unknown"))
             if success:
                 next_item["success"] = int(next_item.get("success") or 0) + 1
+                if duration_ms is not None:
+                    next_item["last_image_duration_ms"] = max(0, int(duration_ms))
+                    next_item["last_image_duration_at"] = now_text
                 if not image_quota_unknown:
                     next_item["quota"] = max(0, int(next_item.get("quota") or 0) - 1)
                 if not image_quota_unknown and next_item["quota"] == 0:

@@ -73,6 +73,12 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         "created_at": task.get("created_at"),
         "updated_at": task.get("updated_at"),
     }
+    if task.get("started_at"):
+        item["started_at"] = task.get("started_at")
+    if task.get("finished_at"):
+        item["finished_at"] = task.get("finished_at")
+    if task.get("duration_ms") is not None:
+        item["duration_ms"] = task.get("duration_ms")
     if task.get("data") is not None:
         item["data"] = task.get("data")
     if task.get("error"):
@@ -169,7 +175,7 @@ class ImageTaskService:
                 ]
                 items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
                 missing_ids = []
-            return {"items": items, "missing_ids": missing_ids}
+            return {"items": items, "missing_ids": missing_ids, "summary": self._summary_locked(owner)}
 
     def _submit(
         self,
@@ -263,9 +269,11 @@ class ImageTaskService:
                 task["updated_at"] = _now_iso()
                 changed = True
                 continue
+            now = _now_iso()
             task["status"] = TASK_STATUS_RUNNING
             task["error"] = ""
-            task["updated_at"] = _now_iso()
+            task["started_at"] = now
+            task["updated_at"] = now
             starts.append((key, *pending))
             changed = True
 
@@ -314,7 +322,8 @@ class ImageTaskService:
         model: str,
     ) -> None:
         started = time.time()
-        self._update_task(key, status=TASK_STATUS_RUNNING, error="")
+        started_at = datetime.fromtimestamp(started).strftime("%Y-%m-%d %H:%M:%S")
+        self._update_task(key, status=TASK_STATUS_RUNNING, error="", started_at=started_at)
         next_delay_secs = 0.0
         try:
             handler = self.edit_handler if mode == "edit" else self.generation_handler
@@ -329,7 +338,14 @@ class ImageTaskService:
                 else:
                     message = "号池中没有可用账号或所有账号均被限流，请检查号池状态（账号额度、是否被封禁、是否到达生图上限）"
                 raise RuntimeError(message)
-            next_delay_secs = self._complete_task(key, status=TASK_STATUS_SUCCESS, data=data, error="")
+            next_delay_secs = self._complete_task(
+                key,
+                status=TASK_STATUS_SUCCESS,
+                data=data,
+                error="",
+                finished_at=_now_iso(),
+                duration_ms=int((time.time() - started) * 1000),
+            )
             self._log_call(
                 identity,
                 mode,
@@ -341,7 +357,14 @@ class ImageTaskService:
             )
         except Exception as exc:
             error_message = str(exc) or "image task failed"
-            next_delay_secs = self._complete_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[])
+            next_delay_secs = self._complete_task(
+                key,
+                status=TASK_STATUS_ERROR,
+                error=error_message,
+                data=[],
+                finished_at=_now_iso(),
+                duration_ms=int((time.time() - started) * 1000),
+            )
             self._log_call(
                 identity,
                 mode,
@@ -391,6 +414,25 @@ class ImageTaskService:
             log_service.add(LOG_TYPE_CALL, f"{summary_prefix}{suffix}", detail)
         except Exception:
             pass
+
+    def _summary_locked(self, owner: str) -> dict[str, object]:
+        owner_tasks = [task for task in self._tasks.values() if task.get("owner_id") == owner]
+        queued_count = sum(1 for task in owner_tasks if task.get("status") == TASK_STATUS_QUEUED)
+        running_count = sum(1 for task in owner_tasks if task.get("status") == TASK_STATUS_RUNNING)
+        runtime = account_service.image_runtime_summary()
+        worker_capacity = int(runtime.get("worker_capacity") or 0)
+        average_duration_ms = runtime.get("recent_average_duration_ms")
+        unfinished_count = queued_count + running_count
+        estimated_processing_ms_per_account = None
+        if isinstance(average_duration_ms, int) and average_duration_ms > 0 and worker_capacity > 0:
+            estimated_processing_ms_per_account = int((unfinished_count / worker_capacity) * average_duration_ms)
+        return {
+            "queued_count": queued_count,
+            "running_count": running_count,
+            "unfinished_count": unfinished_count,
+            "estimated_processing_ms_per_account": estimated_processing_ms_per_account,
+            **runtime,
+        }
 
     def _update_task(self, key: str, **updates: Any) -> None:
         with self._lock:
@@ -444,6 +486,17 @@ class ImageTaskService:
                 "created_at": _clean(item.get("created_at"), _now_iso()),
                 "updated_at": _clean(item.get("updated_at"), _clean(item.get("created_at"), _now_iso())),
             }
+            started_at = _clean(item.get("started_at"))
+            if started_at:
+                task["started_at"] = started_at
+            finished_at = _clean(item.get("finished_at"))
+            if finished_at:
+                task["finished_at"] = finished_at
+            if item.get("duration_ms") is not None:
+                try:
+                    task["duration_ms"] = max(0, int(item.get("duration_ms") or 0))
+                except (TypeError, ValueError):
+                    pass
             data = item.get("data")
             if isinstance(data, list):
                 task["data"] = data
