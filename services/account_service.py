@@ -115,6 +115,40 @@ class AccountService:
             return True
         return int(account.get("quota") or 0) > 0
 
+    @staticmethod
+    def _normalize_account_type(value: object) -> str:
+        text = str(value or "").strip()
+        compact = text.replace("-", "_").replace(" ", "_").lower()
+        aliases = {
+            "free": "free",
+            "plus": "Plus",
+            "team": "Team",
+            "pro": "Pro",
+            "pro_lite": "ProLite",
+            "prolite": "ProLite",
+            "enterprise": "Enterprise",
+        }
+        return aliases.get(compact, text)
+
+    @classmethod
+    def _search_account_type(cls, value: object) -> str | None:
+        if isinstance(value, dict):
+            for key in ("account_type", "accountType", "plan_type", "planType", "plan", "type"):
+                if key in value:
+                    normalized = cls._normalize_account_type(value.get(key))
+                    if normalized:
+                        return normalized
+            for item in value.values():
+                found = cls._search_account_type(item)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for item in value:
+                found = cls._search_account_type(item)
+                if found:
+                    return found
+        return None
+
     def _normalize_account(self, item: dict) -> dict | None:
         if not isinstance(item, dict):
             return None
