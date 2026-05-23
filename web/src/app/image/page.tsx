@@ -599,10 +599,19 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     clearComposerInputs();
   }, [clearComposerInputs]);
 
+  const unlockPagePointerEvents = () => {
+    document.body.style.pointerEvents = "";
+    document.documentElement.style.pointerEvents = "";
+  };
+
   const handleCreateDraft = () => {
     setSelectedConversationId(null);
     resetComposer();
-    textareaRef.current?.focus();
+    unlockPagePointerEvents();
+    window.setTimeout(() => {
+      unlockPagePointerEvents();
+      textareaRef.current?.focus();
+    }, 0);
   };
 
   const handleDeleteConversation = async (id: string) => {
@@ -1180,7 +1189,15 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
           />
         </div>
 
-        <Dialog open={isHistoryOpen} onOpenChange={setIsHistoryOpen}>
+        <Dialog
+          open={isHistoryOpen}
+          onOpenChange={(open) => {
+            setIsHistoryOpen(open);
+            if (!open) {
+              window.setTimeout(unlockPagePointerEvents, 0);
+            }
+          }}
+        >
           <DialogContent className="flex h-[min(82dvh,760px)] w-[92vw] max-w-[460px] flex-col overflow-hidden rounded-[32px] border-white/80 bg-white p-0 shadow-[0_32px_110px_-38px_rgba(15,23,42,0.45)] sm:rounded-[36px]">
             <DialogHeader className="px-6 pt-7 pb-4 sm:px-8">
               <DialogTitle className="flex items-center gap-2 text-xl font-bold tracking-tight">
