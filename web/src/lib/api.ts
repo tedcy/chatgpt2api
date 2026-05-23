@@ -473,6 +473,13 @@ export async function fetchImageTasks(ids: string[]) {
   return httpRequest<ImageTaskListResponse>(`/api/image-tasks${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
+export async function stopImageTaskProcessing(taskIds: string[] = []) {
+  return httpRequest<{ stopped_count: number; summary: ImageTaskSummary }>("/api/image-tasks/stop", {
+    method: "POST",
+    body: { task_ids: taskIds },
+  });
+}
+
 export async function fetchSettingsConfig() {
   return httpRequest<{ config: SettingsConfig }>("/api/settings");
 }

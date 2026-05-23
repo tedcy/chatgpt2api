@@ -189,6 +189,67 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertEqual(summary["recent_average_duration_ms"], 10000)
             self.assertEqual(summary["estimated_processing_ms_per_account"], 10000)
 
+    def test_stop_processing_cancels_queued_tasks_without_blocking_future_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            calls: list[str] = []
+            started = threading.Event()
+            release = threading.Event()
+
+            def handler(payload):
+                calls.append(payload["prompt"])
+                started.set()
+                self.assertTrue(release.wait(1.0))
+                return {"data": [{"url": f"http://example.test/{payload['prompt']}.png"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service._task_worker_limit = lambda: 1  # type: ignore[method-assign]
+            service._task_next_interval_delay = lambda: (0.0, 0.0, 0.0)  # type: ignore[method-assign]
+
+            service.submit_generation(
+                OWNER,
+                client_task_id="task-1",
+                prompt="cat",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+            self.assertTrue(started.wait(1.0))
+            service.submit_generation(
+                OWNER,
+                client_task_id="task-2",
+                prompt="dog",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+
+            result = service.stop_processing(OWNER)
+            self.assertEqual(result["stopped_count"], 1)
+
+            release.set()
+            wait_for_task(service, OWNER, "task-1", "success")
+            time.sleep(0.05)
+
+            task_2 = service.list_tasks(OWNER, ["task-2"])["items"][0]
+            self.assertEqual(task_2["status"], "error")
+            self.assertIn("已停止", task_2["error"])
+            self.assertEqual(calls, ["cat"])
+
+            started.clear()
+            release.clear()
+            service.submit_generation(
+                OWNER,
+                client_task_id="task-3",
+                prompt="fox",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+            self.assertTrue(started.wait(1.0))
+            release.set()
+            wait_for_task(service, OWNER, "task-3", "success")
+            self.assertEqual(calls, ["cat", "fox"])
+
     def test_queued_tasks_obey_worker_limit(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             active = 0

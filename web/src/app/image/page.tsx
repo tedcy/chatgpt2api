@@ -22,6 +22,7 @@ import {
   createImageGenerationTask,
   fetchAccounts,
   fetchImageTasks,
+  stopImageTaskProcessing,
   type Account,
   type ImageTask,
   type ImageTaskSummary,
@@ -369,6 +370,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [availableQuota, setAvailableQuota] = useState("加载中...");
   const [imageTaskSummary, setImageTaskSummary] = useState<ImageTaskSummary>(EMPTY_IMAGE_TASK_SUMMARY);
+  const [isStoppingImageTaskProcessing, setIsStoppingImageTaskProcessing] = useState(false);
   const [lightboxImages, setLightboxImages] = useState<ImageLightboxItem[]>([]);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
@@ -613,6 +615,33 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       textareaRef.current?.focus();
     }, 0);
   };
+
+  const handleStopImageTaskProcessing = useCallback(async () => {
+    if (!isAdmin || isStoppingImageTaskProcessing) {
+      return;
+    }
+    const taskIds =
+      selectedConversation?.turns.flatMap((turn) =>
+        turn.images.flatMap((image) =>
+          image.status === "loading" ? [image.taskId || image.id] : [],
+        ),
+      ) ?? [];
+    setIsStoppingImageTaskProcessing(true);
+    try {
+      const result = await stopImageTaskProcessing(taskIds);
+      setImageTaskSummary(result.summary ?? imageTaskSummary);
+      toast.success(
+        result.stopped_count > 0
+          ? `已停止 ${result.stopped_count} 个未开始任务，当前生成会继续完成`
+          : "没有可停止的排队任务，当前生成会继续完成",
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "更新图片处理状态失败";
+      toast.error(message);
+    } finally {
+      setIsStoppingImageTaskProcessing(false);
+    }
+  }, [imageTaskSummary, isAdmin, isStoppingImageTaskProcessing, selectedConversation]);
 
   const handleDeleteConversation = async (id: string) => {
     const nextConversations = conversations.filter((item) => item.id !== id);
@@ -1279,6 +1308,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             availableQuota={availableQuota}
             activeTaskCount={activeTaskCount}
             imageTaskSummary={imageTaskSummary}
+            canStopProcessing={isAdmin}
+            isStopProcessingPending={isStoppingImageTaskProcessing}
             referenceImages={referenceImages}
             textareaRef={textareaRef}
             fileInputRef={fileInputRef}
@@ -1286,6 +1317,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             onImageCountChange={(value) => setImageCount(value ? clampImageCount(value) : "")}
             onImageSizeChange={setImageSize}
             onSubmit={handleSubmit}
+            onStopProcessing={handleStopImageTaskProcessing}
             onPickReferenceImage={() => fileInputRef.current?.click()}
             onReferenceImageChange={handleReferenceImageChange}
             onRemoveReferenceImage={handleRemoveReferenceImage}

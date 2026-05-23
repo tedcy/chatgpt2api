@@ -1,5 +1,5 @@
 "use client";
-import { ArrowUp, Check, ChevronDown, ImagePlus, LoaderCircle, X } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, ImagePlus, LoaderCircle, Square, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type MouseEvent, type RefObject } from "react";
 
 import { ImageLightbox } from "@/components/image-lightbox";
@@ -16,6 +16,8 @@ type ImageComposerProps = {
   availableQuota: string;
   activeTaskCount: number;
   imageTaskSummary: ImageTaskSummary;
+  canStopProcessing: boolean;
+  isStopProcessingPending: boolean;
   referenceImages: Array<{ name: string; dataUrl: string }>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   fileInputRef: RefObject<HTMLInputElement | null>;
@@ -23,6 +25,7 @@ type ImageComposerProps = {
   onImageCountChange: (value: string) => void;
   onImageSizeChange: (value: string) => void;
   onSubmit: () => void | Promise<void>;
+  onStopProcessing: () => void | Promise<void>;
   onPickReferenceImage: () => void;
   onReferenceImageChange: (files: File[]) => void | Promise<void>;
   onRemoveReferenceImage: (index: number) => void;
@@ -35,6 +38,8 @@ export function ImageComposer({
   availableQuota,
   activeTaskCount,
   imageTaskSummary,
+  canStopProcessing,
+  isStopProcessingPending,
   referenceImages,
   textareaRef,
   fileInputRef,
@@ -42,6 +47,7 @@ export function ImageComposer({
   onImageCountChange,
   onImageSizeChange,
   onSubmit,
+  onStopProcessing,
   onPickReferenceImage,
   onReferenceImageChange,
   onRemoveReferenceImage,
@@ -210,6 +216,23 @@ export function ImageComposer({
                       {backendTaskCount}<span className="hidden sm:inline"> 个任务处理中</span>
                     </div>
                   )}
+                  {canStopProcessing ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-9 shrink-0 rounded-full border-rose-200 bg-rose-50 px-3 text-xs font-medium text-rose-700 shadow-none hover:bg-rose-100 sm:h-10 sm:px-4 sm:text-sm"
+                      onClick={() => void onStopProcessing()}
+                      disabled={isStopProcessingPending || backendTaskCount <= 0}
+                      aria-label="停止处理新图片"
+                    >
+                      {isStopProcessingPending ? (
+                        <LoaderCircle className="size-3.5 animate-spin sm:size-4" />
+                      ) : (
+                        <Square className="size-3.5 sm:size-4" />
+                      )}
+                      <span>停止</span>
+                    </Button>
+                  ) : null}
                   {(imageTaskSummary.queued_count > 0 || imageTaskSummary.running_count > 0) && (
                     <div className="flex shrink-0 items-center gap-1.5 rounded-full bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-600 sm:px-3 sm:py-2 sm:text-xs">
                       <span>排队 {imageTaskSummary.queued_count}</span>

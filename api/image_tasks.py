@@ -5,7 +5,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from api.image_inputs import parse_image_edit_request, read_image_sources
-from api.support import require_identity, resolve_image_base_url
+from api.support import require_admin, require_identity, resolve_image_base_url
 from services.content_filter import check_request
 from services.image_task_service import image_task_service
 from services.log_service import LoggedCall
@@ -16,6 +16,10 @@ class ImageGenerationTaskRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     model: str = "gpt-image-2"
     size: str | None = None
+
+
+class ImageTaskStopRequest(BaseModel):
+    task_ids: list[str] = Field(default_factory=list)
 
 
 def _parse_task_ids(value: str) -> list[str]:
@@ -40,6 +44,14 @@ def create_router() -> APIRouter:
     ):
         identity = require_identity(authorization)
         return await run_in_threadpool(image_task_service.list_tasks, identity, _parse_task_ids(ids))
+
+    @router.post("/api/image-tasks/stop")
+    async def stop_image_task_processing(
+        body: ImageTaskStopRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        identity = require_admin(authorization)
+        return await run_in_threadpool(image_task_service.stop_processing, identity, body.task_ids)
 
     @router.post("/api/image-tasks/generations")
     async def create_generation_task(

@@ -19,6 +19,7 @@ class FakeImageTaskService:
     def __init__(self):
         self.generation_calls = []
         self.edit_calls = []
+        self.stop_calls = []
 
     def submit_generation(self, identity, **kwargs):
         self.generation_calls.append((identity, kwargs))
@@ -56,6 +57,24 @@ class FakeImageTaskService:
                 if task_id != "missing"
             ],
             "missing_ids": [task_id for task_id in ids if task_id == "missing"],
+        }
+
+    def stop_processing(self, identity):
+        self.stop_calls.append(identity)
+        return {
+            "stopped_count": 1,
+            "summary": {
+                "queued_count": 0,
+                "running_count": 1,
+                "unfinished_count": 1,
+                "account_count": 1,
+                "available_account_count": 1,
+                "image_account_concurrency": 1,
+                "worker_capacity": 1,
+                "recent_sample_count": 0,
+                "recent_average_duration_ms": None,
+                "estimated_processing_ms_per_account": None,
+            },
         }
 
 
@@ -117,6 +136,13 @@ class ImageTasksApiTests(unittest.TestCase):
         self.assertEqual(len(self.fake_service.edit_calls), 1)
         images = self.fake_service.edit_calls[0][1]["images"]
         self.assertEqual(images, [(PNG_BYTES, "image_url.png", "image/png")])
+
+    def test_stop_image_task_processing(self):
+        response = self.client.post("/api/image-tasks/stop", headers=AUTH_HEADERS, json={})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["stopped_count"], 1)
+        self.assertEqual(len(self.fake_service.stop_calls), 1)
 
     def test_list_tasks_reports_missing_ids(self):
         response = self.client.get("/api/image-tasks?ids=task-1,missing", headers=AUTH_HEADERS)

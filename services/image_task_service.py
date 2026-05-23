@@ -184,6 +184,30 @@ class ImageTaskService:
                 missing_ids = []
             return {"items": items, "missing_ids": missing_ids, "summary": self._summary_locked(owner)}
 
+    def stop_processing(self, identity: dict[str, object], task_ids: list[str] | None = None) -> dict[str, Any]:
+        owner = _owner_id(identity)
+        requested_keys = {
+            _task_key(owner, task_id)
+            for task_id in [_clean(task_id) for task_id in (task_ids or [])]
+            if task_id
+        }
+        stopped_count = 0
+        with self._lock:
+            for key, task in self._tasks.items():
+                if task.get("owner_id") != owner or task.get("status") != TASK_STATUS_QUEUED:
+                    continue
+                if requested_keys and key not in requested_keys:
+                    continue
+                task["status"] = TASK_STATUS_ERROR
+                task["error"] = "已停止处理，未开始的图片任务已跳过"
+                task["updated_at"] = _now_iso()
+                self._pending_payloads.pop(key, None)
+                stopped_count += 1
+            if stopped_count:
+                self._save_locked()
+            summary = self._summary_locked(owner)
+        return {"stopped_count": stopped_count, "summary": summary}
+
     def _submit(
         self,
         identity: dict[str, object],
