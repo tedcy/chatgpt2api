@@ -17,8 +17,12 @@ type ImageLightboxProps = {
   images: LightboxImage[];
   currentIndex: number;
   open: boolean;
+  canGoPrevious?: boolean;
+  canGoNext?: boolean;
   onOpenChange: (open: boolean) => void;
   onIndexChange: (index: number) => void;
+  onNavigatePrevious?: () => void | Promise<void>;
+  onNavigateNext?: () => void | Promise<void>;
 };
 
 type ImageTransform = {
@@ -104,8 +108,12 @@ export function ImageLightbox({
   images,
   currentIndex,
   open,
+  canGoPrevious,
+  canGoNext,
   onOpenChange,
   onIndexChange,
+  onNavigatePrevious,
+  onNavigateNext,
 }: ImageLightboxProps) {
   const gestureRef = useRef<TouchGesture | null>(null);
   const pointerPanRef = useRef<PointerPan | null>(null);
@@ -116,8 +124,10 @@ export function ImageLightbox({
   const [transform, setTransform] = useState<ImageTransform>({ scale: 1, x: 0, y: 0 });
   const [isGesturing, setIsGesturing] = useState(false);
   const current = images[currentIndex];
-  const hasPrev = currentIndex > 0;
-  const hasNext = currentIndex < images.length - 1;
+  const hasPrevInCurrentSet = currentIndex > 0;
+  const hasNextInCurrentSet = currentIndex < images.length - 1;
+  const hasPrev = canGoPrevious ?? hasPrevInCurrentSet;
+  const hasNext = canGoNext ?? hasNextInCurrentSet;
 
   const cancelScheduledTransform = useCallback(() => {
     if (rafRef.current != null) {
@@ -160,12 +170,30 @@ export function ImageLightbox({
   }, [cancelScheduledTransform]);
 
   const goPrev = useCallback(() => {
-    if (hasPrev) onIndexChange(currentIndex - 1);
-  }, [hasPrev, currentIndex, onIndexChange]);
+    if (!hasPrev) return;
+    if (onNavigatePrevious) {
+      void onNavigatePrevious();
+      return;
+    }
+    if (hasPrevInCurrentSet) onIndexChange(currentIndex - 1);
+  }, [hasPrev, hasPrevInCurrentSet, currentIndex, onIndexChange, onNavigatePrevious]);
 
   const goNext = useCallback(() => {
-    if (hasNext) onIndexChange(currentIndex + 1);
-  }, [hasNext, currentIndex, onIndexChange]);
+    if (!hasNext) return;
+    if (onNavigateNext) {
+      void onNavigateNext();
+      return;
+    }
+    if (hasNextInCurrentSet) onIndexChange(currentIndex + 1);
+  }, [hasNext, hasNextInCurrentSet, currentIndex, onIndexChange, onNavigateNext]);
+
+  const goPrevWithinCurrentSet = useCallback(() => {
+    if (hasPrevInCurrentSet) onIndexChange(currentIndex - 1);
+  }, [hasPrevInCurrentSet, currentIndex, onIndexChange]);
+
+  const goNextWithinCurrentSet = useCallback(() => {
+    if (hasNextInCurrentSet) onIndexChange(currentIndex + 1);
+  }, [hasNextInCurrentSet, currentIndex, onIndexChange]);
 
   useEffect(() => {
     resetTransform();
@@ -353,12 +381,12 @@ export function ImageLightbox({
       }
 
       if (deltaX > 0) {
-        goPrev();
+        goPrevWithinCurrentSet();
       } else {
-        goNext();
+        goNextWithinCurrentSet();
       }
     },
-    [goPrev, goNext, zoomTransformAt, flushScheduledTransform],
+    [goPrevWithinCurrentSet, goNextWithinCurrentSet, zoomTransformAt, flushScheduledTransform],
   );
 
   const handleTouchCancel = useCallback(() => {

@@ -17,6 +17,7 @@ import { deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImag
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LONG_PRESS_MS = 800;
+const PAGE_SIZE = 12;
 
 function storageBadge(item: ManagedImage) {
   if (item.local && item.webdav) {
@@ -73,6 +74,7 @@ function ImageManagerContent() {
   const [endDate, setEndDate] = useState("");
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [isLightboxPaging, setIsLightboxPaging] = useState(false);
   const [page, setPage] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [deleteTarget, setDeleteTarget] = useState<ManagedImage | null>(null);
@@ -83,18 +85,19 @@ function ImageManagerContent() {
   const [tagInput, setTagInput] = useState("");
   const [dialogVisible, setDialogVisible] = useState(false);
   const deleteTargetRef = useRef<ManagedImage | null>(null);
+  const skipNextPageLoadRef = useRef(false);
+  const lightboxPagingRef = useRef(false);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [deleteMode, setDeleteMode] = useState<"selected" | "filtered" | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
 
   const lightboxImages = items.map((item) => ({
-    id: item.name,
+    id: imageKey(item),
     src: item.url,
     sizeLabel: formatSize(item.size),
     dimensions: item.width && item.height ? `${item.width} x ${item.height}` : undefined,
   }));
-  const pageSize = 12;
-  const pageCount = Math.max(1, Math.ceil(totalItems / pageSize));
+  const pageCount = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
   const safePage = Math.min(page, pageCount);
   const currentRows = items;
   const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
@@ -110,7 +113,7 @@ function ImageManagerContent() {
           start_date: startDate,
           end_date: endDate,
           page: nextPage,
-          page_size: pageSize,
+          page_size: PAGE_SIZE,
           tags: selectedTags,
           refresh: options.refresh,
         }),
@@ -126,6 +129,69 @@ function ImageManagerContent() {
       setIsLoading(false);
     }
   };
+
+  const loadLightboxPage = useCallback(
+    async (nextPage: number, target: "first" | "last") => {
+      if (lightboxPagingRef.current) {
+        return;
+      }
+      lightboxPagingRef.current = true;
+      setIsLightboxPaging(true);
+      try {
+        const data = await fetchManagedImages({
+          start_date: startDate,
+          end_date: endDate,
+          page: nextPage,
+          page_size: PAGE_SIZE,
+          tags: selectedTags,
+        });
+        if (data.items.length === 0) {
+          return;
+        }
+        setItems(data.items);
+        setTotalItems(data.total);
+        if (data.page !== page) {
+          skipNextPageLoadRef.current = true;
+        }
+        setPage(data.page);
+        setLightboxIndex(target === "first" ? 0 : data.items.length - 1);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "加载图片失败");
+      } finally {
+        lightboxPagingRef.current = false;
+        setIsLightboxPaging(false);
+      }
+    },
+    [endDate, page, selectedTags, startDate],
+  );
+
+  const handleLightboxPrevious = useCallback(() => {
+    if (lightboxPagingRef.current) {
+      return;
+    }
+    if (lightboxIndex > 0) {
+      setLightboxIndex((value) => Math.max(0, value - 1));
+      return;
+    }
+    if (safePage <= 1) {
+      return;
+    }
+    void loadLightboxPage(safePage - 1, "last");
+  }, [lightboxIndex, loadLightboxPage, safePage]);
+
+  const handleLightboxNext = useCallback(() => {
+    if (lightboxPagingRef.current) {
+      return;
+    }
+    if (lightboxIndex < items.length - 1) {
+      setLightboxIndex((value) => Math.min(items.length - 1, value + 1));
+      return;
+    }
+    if (safePage >= pageCount) {
+      return;
+    }
+    void loadLightboxPage(safePage + 1, "first");
+  }, [items.length, lightboxIndex, loadLightboxPage, pageCount, safePage]);
 
   const closeDialog = useCallback(() => {
     setDialogVisible(false);
@@ -270,6 +336,10 @@ function ImageManagerContent() {
   };
 
   useEffect(() => {
+    if (skipNextPageLoadRef.current) {
+      skipNextPageLoadRef.current = false;
+      return;
+    }
     void loadImages();
   }, [page, startDate, endDate, selectedTags.join(",")]);
 
@@ -375,8 +445,7 @@ function ImageManagerContent() {
             </div>
           </div>
           <div className="grid gap-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {currentRows.map((item) => {
-              const imageIndex = items.findIndex((row) => row.url === item.url);
+            {currentRows.map((item, imageIndex) => {
               const storage = storageBadge(item);
               return (
               <div key={item.rel} className="group border-r border-b border-stone-100 p-4 transition hover:bg-stone-50">
@@ -583,8 +652,12 @@ function ImageManagerContent() {
         images={lightboxImages}
         currentIndex={lightboxIndex}
         open={lightboxOpen}
+        canGoPrevious={!isLightboxPaging && (lightboxIndex > 0 || safePage > 1)}
+        canGoNext={!isLightboxPaging && (lightboxIndex < items.length - 1 || safePage < pageCount)}
         onOpenChange={setLightboxOpen}
         onIndexChange={setLightboxIndex}
+        onNavigatePrevious={handleLightboxPrevious}
+        onNavigateNext={handleLightboxNext}
       />
       <Dialog open={Boolean(deleteMode)} onOpenChange={(open) => (!open ? setDeleteMode(null) : null)}>
         <DialogContent showCloseButton={false} className="rounded-2xl p-6">
