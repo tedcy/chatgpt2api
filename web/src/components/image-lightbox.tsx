@@ -60,7 +60,7 @@ type TouchGesture =
     };
 
 const minScale = 1;
-const maxScale = 4;
+const maxScale = 32;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
