@@ -196,6 +196,16 @@ export type ManagedImage = {
   width?: number;
   height?: number;
   tags?: string[];
+  viewed: boolean;
+  viewed_at?: string;
+};
+
+export type ImageViewStatus = "all" | "unviewed" | "viewed";
+
+export type ImageViewCounts = {
+  all: number;
+  viewed: number;
+  unviewed: number;
 };
 
 export type SystemLog = {
@@ -548,6 +558,7 @@ export async function fetchManagedImages(filters: {
   page?: number;
   page_size?: number;
   tags?: string[];
+  view_status?: ImageViewStatus;
   refresh?: boolean;
 }) {
   const params = new URLSearchParams();
@@ -556,13 +567,21 @@ export async function fetchManagedImages(filters: {
   if (filters.page) params.set("page", String(filters.page));
   if (filters.page_size) params.set("page_size", String(filters.page_size));
   if (filters.tags?.length) params.set("tags", filters.tags.join(","));
+  if (filters.view_status && filters.view_status !== "all") params.set("view_status", filters.view_status);
   if (filters.refresh) params.set("refresh", "true");
-  return httpRequest<{ items: ManagedImage[]; groups: Array<{ date: string; items: ManagedImage[] }>; total: number; page: number; page_size: number }>(
+  return httpRequest<{ items: ManagedImage[]; groups: Array<{ date: string; items: ManagedImage[] }>; total: number; page: number; page_size: number; view_counts: ImageViewCounts }>(
     `/api/images${params.toString() ? `?${params.toString()}` : ""}`,
   );
 }
 
-export async function deleteManagedImages(body: { paths?: string[]; start_date?: string; end_date?: string; all_matching?: boolean; tags?: string[] }) {
+export async function markManagedImagesViewed(paths: string[]) {
+  return httpRequest<{ ok: boolean; updated: number; viewed_at: string }>("/api/images/viewed", {
+    method: "POST",
+    body: { paths },
+  });
+}
+
+export async function deleteManagedImages(body: { paths?: string[]; start_date?: string; end_date?: string; all_matching?: boolean; tags?: string[]; view_status?: ImageViewStatus }) {
   return httpRequest<{ removed: number }>("/api/images/delete", { method: "POST", body });
 }
 

@@ -13,6 +13,7 @@ from services.config import config
 from services.image_service import delete_images, download_images_zip, get_image_download_response, get_image_response, get_thumbnail_response, list_images
 from services.image_storage_service import ImageStorageError, image_storage_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
+from services.image_views_service import mark_viewed
 from services.log_service import log_service
 from services.proxy_service import test_proxy
 
@@ -31,6 +32,7 @@ class ImageDeleteRequest(BaseModel):
     end_date: str = ""
     all_matching: bool = False
     tags: list[str] = []
+    view_status: str = "all"
 
 class ImageDownloadRequest(BaseModel):
     paths: list[str]
@@ -38,6 +40,9 @@ class ImageDownloadRequest(BaseModel):
 class ImageTagsRequest(BaseModel):
     path: str
     tags: list[str]
+
+class ImageViewedRequest(BaseModel):
+    paths: list[str] = []
 
 class LogDeleteRequest(BaseModel):
     ids: list[str] = []
@@ -84,6 +89,7 @@ def create_router(app_version: str) -> APIRouter:
         page: int = 1,
         page_size: int = 12,
         tags: str = "",
+        view_status: str = "all",
         refresh: bool = False,
         authorization: str | None = Header(default=None),
     ):
@@ -97,6 +103,7 @@ def create_router(app_version: str) -> APIRouter:
             page=page,
             page_size=page_size,
             tags=selected_tags,
+            view_status=view_status.strip(),
             refresh=refresh,
         )
 
@@ -118,6 +125,7 @@ def create_router(app_version: str) -> APIRouter:
             end_date=body.end_date.strip(),
             all_matching=body.all_matching,
             tags=body.tags,
+            view_status=body.view_status.strip(),
         )
 
     @router.post("/api/images/download")
@@ -134,6 +142,11 @@ def create_router(app_version: str) -> APIRouter:
     async def download_single_image_endpoint(image_path: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return get_image_download_response(image_path)
+
+    @router.post("/api/images/viewed")
+    async def mark_images_viewed_endpoint(body: ImageViewedRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return await run_in_threadpool(mark_viewed, body.paths)
 
     @router.get("/api/logs")
     async def get_logs(

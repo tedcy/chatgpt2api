@@ -18,6 +18,7 @@ from curl_cffi import requests
 from services.config import BASE_DIR, CONFIG_FILE, DATA_DIR, config, load_backup_state, save_backup_state
 from services.image_storage_service import IMAGE_INDEX_FILE
 from services.image_tags_service import TAGS_FILE
+from services.image_views_service import IMAGE_VIEWS_FILE
 
 
 def _utc_now() -> datetime:
@@ -647,6 +648,7 @@ class BackupService:
                 )
             if include.get("images"):
                 self._add_file_to_archive(archive, TAGS_FILE, "data/image_tags.json")
+                self._add_file_to_archive(archive, IMAGE_VIEWS_FILE, "data/image_views.json")
                 self._add_directory_to_archive(archive, config.images_dir, "data/images")
         return buffer.getvalue()
 

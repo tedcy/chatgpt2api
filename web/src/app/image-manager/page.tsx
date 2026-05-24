@@ -13,11 +13,17 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImage, fetchImageTags, fetchManagedImages, setImageTags, type ManagedImage } from "@/lib/api";
+import { deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImage, fetchImageTags, fetchManagedImages, markManagedImagesViewed, setImageTags, type ImageViewCounts, type ImageViewStatus, type ManagedImage } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LONG_PRESS_MS = 800;
 const PAGE_SIZE = 12;
+const EMPTY_VIEW_COUNTS: ImageViewCounts = { all: 0, viewed: 0, unviewed: 0 };
+const VIEW_FILTERS: Array<{ value: ImageViewStatus; label: string }> = [
+  { value: "all", label: "全部" },
+  { value: "unviewed", label: "未看" },
+  { value: "viewed", label: "已看" },
+];
 
 function storageBadge(item: ManagedImage) {
   if (item.local && item.webdav) {
@@ -31,6 +37,11 @@ function storageBadge(item: ManagedImage) {
 
 function formatSize(size: number) {
   return size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(2)} MB` : `${Math.ceil(size / 1024)} KB`;
+}
+
+function formatLocalDateTime(date = new Date()) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 function imageKey(item: ManagedImage) {
@@ -70,6 +81,8 @@ function useLongPress(onLongPress: () => void, ms = LONG_PRESS_MS) {
 function ImageManagerContent() {
   const [items, setItems] = useState<ManagedImage[]>([]);
   const [totalItems, setTotalItems] = useState(0);
+  const [viewCounts, setViewCounts] = useState<ImageViewCounts>(EMPTY_VIEW_COUNTS);
+  const [viewStatus, setViewStatus] = useState<ImageViewStatus>("all");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [lightboxIndex, setLightboxIndex] = useState(0);
@@ -88,6 +101,9 @@ function ImageManagerContent() {
   const deleteTargetRef = useRef<ManagedImage | null>(null);
   const skipNextPageLoadRef = useRef(false);
   const lightboxPagingRef = useRef(false);
+  const pendingViewRefreshRef = useRef(false);
+  const markingViewedRef = useRef<Set<string>>(new Set());
+  const pendingViewRequestsRef = useRef<Set<Promise<void>>>(new Set());
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [deleteMode, setDeleteMode] = useState<"selected" | "filtered" | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
@@ -105,7 +121,7 @@ function ImageManagerContent() {
   const selectedCount = deleteMode === "filtered" ? totalItems : selectedPaths.length;
   const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(imageKey(item)));
 
-  const loadImages = async (options: { refresh?: boolean; nextPage?: number } = {}) => {
+  const loadImages = useCallback(async (options: { refresh?: boolean; nextPage?: number } = {}) => {
     setIsLoading(true);
     try {
       const nextPage = options.nextPage ?? page;
@@ -116,12 +132,14 @@ function ImageManagerContent() {
           page: nextPage,
           page_size: PAGE_SIZE,
           tags: selectedTags,
+          view_status: viewStatus,
           refresh: options.refresh,
         }),
         fetchImageTags(),
       ]);
       setItems(data.items);
       setTotalItems(data.total);
+      setViewCounts(data.view_counts ?? EMPTY_VIEW_COUNTS);
       setAllTags(tagsData.tags);
       setPage(data.page);
     } catch (error) {
@@ -129,7 +147,7 @@ function ImageManagerContent() {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [endDate, page, selectedTags, startDate, viewStatus]);
 
   const loadLightboxPage = useCallback(
     async (nextPage: number, target: "first" | "last") => {
@@ -139,23 +157,42 @@ function ImageManagerContent() {
       lightboxPagingRef.current = true;
       setIsLightboxPaging(true);
       try {
-        const data = await fetchManagedImages({
+        const fetchPage = (targetPage: number) => fetchManagedImages({
           start_date: startDate,
           end_date: endDate,
-          page: nextPage,
+          page: targetPage,
           page_size: PAGE_SIZE,
           tags: selectedTags,
+          view_status: viewStatus,
         });
+        const currentKeys = new Set(items.map(imageKey));
+        let data;
+        let targetIndex = 0;
+        if (viewStatus === "unviewed" && target === "first" && nextPage > page) {
+          const shiftedData = await fetchPage(page);
+          const shiftedIndex = shiftedData.items.findIndex((item) => !currentKeys.has(imageKey(item)));
+          if (shiftedIndex >= 0) {
+            data = shiftedData;
+            targetIndex = shiftedIndex;
+          } else {
+            data = await fetchPage(nextPage);
+            targetIndex = 0;
+          }
+        } else {
+          data = await fetchPage(nextPage);
+          targetIndex = target === "first" ? 0 : data.items.length - 1;
+        }
         if (data.items.length === 0) {
           return;
         }
         setItems(data.items);
         setTotalItems(data.total);
+        setViewCounts(data.view_counts ?? EMPTY_VIEW_COUNTS);
         if (data.page !== page) {
           skipNextPageLoadRef.current = true;
         }
         setPage(data.page);
-        setLightboxIndex(target === "first" ? 0 : data.items.length - 1);
+        setLightboxIndex(Math.max(0, Math.min(targetIndex, data.items.length - 1)));
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "加载图片失败");
       } finally {
@@ -163,7 +200,7 @@ function ImageManagerContent() {
         setIsLightboxPaging(false);
       }
     },
-    [endDate, page, selectedTags, startDate],
+    [endDate, items, page, selectedTags, startDate, viewStatus],
   );
 
   const handleLightboxPrevious = useCallback(() => {
@@ -193,6 +230,67 @@ function ImageManagerContent() {
     }
     void loadLightboxPage(safePage + 1, "first");
   }, [items.length, lightboxIndex, loadLightboxPage, pageCount, safePage]);
+
+  const setItemViewed = useCallback((rel: string, viewed: boolean, viewedAt?: string) => {
+    setItems((prev) => prev.map((item) => item.rel === rel ? {
+      ...item,
+      viewed,
+      viewed_at: viewed ? (viewedAt ?? item.viewed_at) : undefined,
+    } : item));
+  }, []);
+
+  const markImageViewed = useCallback((item: ManagedImage) => {
+    const rel = item.rel;
+    if (!rel || item.viewed || markingViewedRef.current.has(rel)) {
+      return;
+    }
+    markingViewedRef.current.add(rel);
+    const viewedAt = formatLocalDateTime();
+    setItemViewed(rel, true, viewedAt);
+    setViewCounts((prev) => ({
+      all: prev.all,
+      viewed: Math.min(prev.all, prev.viewed + 1),
+      unviewed: Math.max(0, prev.unviewed - 1),
+    }));
+    if (viewStatus === "unviewed") {
+      pendingViewRefreshRef.current = true;
+    }
+
+    const request = markManagedImagesViewed([rel])
+      .then((result) => {
+        setItemViewed(rel, true, result.viewed_at);
+      })
+      .catch((error) => {
+        markingViewedRef.current.delete(rel);
+        setItemViewed(rel, false);
+        setViewCounts((prev) => ({
+          all: prev.all,
+          viewed: Math.max(0, prev.viewed - 1),
+          unviewed: Math.min(prev.all, prev.unviewed + 1),
+        }));
+        toast.error(error instanceof Error ? error.message : "标记已看失败");
+      })
+      .finally(() => {
+        pendingViewRequestsRef.current.delete(request);
+      });
+    pendingViewRequestsRef.current.add(request);
+  }, [setItemViewed, viewStatus]);
+
+  const handleLightboxOpenChange = useCallback((open: boolean) => {
+    setLightboxOpen(open);
+    if (open || !pendingViewRefreshRef.current) {
+      return;
+    }
+    pendingViewRefreshRef.current = false;
+    const refreshAfterMarks = async () => {
+      const pendingRequests = Array.from(pendingViewRequestsRef.current);
+      if (pendingRequests.length > 0) {
+        await Promise.allSettled(pendingRequests);
+      }
+      await loadImages({ nextPage: safePage });
+    };
+    void refreshAfterMarks();
+  }, [loadImages, safePage]);
 
   const handleJumpPage = useCallback(() => {
     const value = pageInput.trim();
@@ -228,6 +326,11 @@ function ImageManagerContent() {
       await deleteManagedImages({ paths: [deleteTarget.rel] });
       setItems((prev) => prev.filter((item) => item.rel !== deleteTarget.rel));
       setTotalItems((prev) => Math.max(0, prev - 1));
+      setViewCounts((prev) => ({
+        all: Math.max(0, prev.all - 1),
+        viewed: deleteTarget.viewed ? Math.max(0, prev.viewed - 1) : prev.viewed,
+        unviewed: deleteTarget.viewed ? prev.unviewed : Math.max(0, prev.unviewed - 1),
+      }));
       setSelectedPaths((prev) => prev.filter((p) => p !== imageKey(deleteTarget)));
       toast.success("图片已删除");
     } catch (error) {
@@ -309,6 +412,7 @@ function ImageManagerContent() {
     setStartDate("");
     setEndDate("");
     setSelectedTags([]);
+    setViewStatus("all");
     setPage(1);
   };
 
@@ -321,7 +425,7 @@ function ImageManagerContent() {
     setIsDeleting(true);
     try {
       const data = await deleteManagedImages(deleteMode === "filtered"
-        ? { start_date: startDate, end_date: endDate, all_matching: true, tags: selectedTags }
+        ? { start_date: startDate, end_date: endDate, all_matching: true, tags: selectedTags, view_status: viewStatus }
         : { paths: selectedPaths });
       toast.success(`已删除 ${data.removed} 张图片`);
       setDeleteMode(null);
@@ -353,12 +457,22 @@ function ImageManagerContent() {
   };
 
   useEffect(() => {
+    if (!lightboxOpen) {
+      return;
+    }
+    const currentItem = items[lightboxIndex];
+    if (currentItem) {
+      markImageViewed(currentItem);
+    }
+  }, [items, lightboxIndex, lightboxOpen, markImageViewed]);
+
+  useEffect(() => {
     if (skipNextPageLoadRef.current) {
       skipNextPageLoadRef.current = false;
       return;
     }
     void loadImages();
-  }, [page, startDate, endDate, selectedTags.join(",")]);
+  }, [loadImages]);
 
   useEffect(() => {
     setPageInput(String(safePage));
@@ -380,7 +494,7 @@ function ImageManagerContent() {
             {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
             查询
           </Button>
-          <Button variant="outline" onClick={() => setDeleteMode("filtered")} disabled={isDeleting || totalItems === 0 || (!startDate && !endDate && selectedTags.length === 0)} className="h-10 rounded-xl border-rose-200 bg-white px-4 text-rose-600 hover:bg-rose-50">
+          <Button variant="outline" onClick={() => setDeleteMode("filtered")} disabled={isDeleting || totalItems === 0 || (!startDate && !endDate && selectedTags.length === 0 && viewStatus === "all")} className="h-10 rounded-xl border-rose-200 bg-white px-4 text-rose-600 hover:bg-rose-50">
             <Trash2 className="size-4" />
             删除匹配条件
           </Button>
@@ -441,6 +555,28 @@ function ImageManagerContent() {
             <div className="flex flex-wrap items-center gap-3 text-sm text-stone-600">
               <ImageIcon className="size-4" />
               共 {totalItems} 张
+              <div className="inline-flex items-center rounded-lg border border-stone-200 bg-stone-50 p-0.5">
+                {VIEW_FILTERS.map((option) => {
+                  const active = viewStatus === option.value;
+                  const count = viewCounts[option.value];
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={`inline-flex h-7 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition ${active ? "bg-white text-stone-900 shadow-sm" : "text-stone-500 hover:text-stone-900"}`}
+                      disabled={isLoading && !active}
+                      onClick={() => {
+                        if (active) return;
+                        setViewStatus(option.value);
+                        setPage(1);
+                      }}
+                    >
+                      <span>{option.label}</span>
+                      <span className={active ? "text-stone-500" : "text-stone-400"}>{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
               <label className="flex items-center gap-2">
                 <Checkbox checked={currentPageSelected} onCheckedChange={(checked) => togglePaths(currentRows.map(imageKey), Boolean(checked))} />
                 本页全选
@@ -491,6 +627,9 @@ function ImageManagerContent() {
                     />
                     <span className="absolute right-2 bottom-2 rounded-full bg-black/50 p-2 text-white opacity-100 transition sm:opacity-0 sm:group-hover:opacity-100">
                       <Maximize2 className="size-4" />
+                    </span>
+                    <span className={`absolute bottom-2 left-2 rounded-md border px-2 py-1 text-[10px] font-medium ${item.viewed ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}`}>
+                      {item.viewed ? "已看" : "未看"}
                     </span>
                     <span className={`absolute top-2 left-2 rounded-md border px-2 py-1 text-[10px] font-medium ${storage.className}`}>
                       {storage.label}
@@ -697,7 +836,7 @@ function ImageManagerContent() {
         canGoPrevious={!isLightboxPaging && (lightboxIndex > 0 || safePage > 1)}
         canGoNext={!isLightboxPaging && (lightboxIndex < items.length - 1 || safePage < pageCount)}
         pageLabel={`第 ${safePage} / ${pageCount} 页`}
-        onOpenChange={setLightboxOpen}
+        onOpenChange={handleLightboxOpenChange}
         onIndexChange={setLightboxIndex}
         onNavigatePrevious={handleLightboxPrevious}
         onNavigateNext={handleLightboxNext}

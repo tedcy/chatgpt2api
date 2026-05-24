@@ -11,6 +11,7 @@ from PIL import Image, ImageOps
 from services.config import config
 from services.image_storage_service import image_storage_service
 from services.image_tags_service import load_tags, remove_tags
+from services.image_views_service import load_views, remove_views
 
 THUMBNAIL_SIZE = (320, 320)
 
@@ -139,6 +140,11 @@ def _normalize_page_size(value: int | str, default: int = 12) -> int:
         return default
 
 
+def _normalize_view_status(value: str) -> str:
+    status = str(value or "").strip().lower()
+    return status if status in {"viewed", "unviewed"} else "all"
+
+
 def list_images(
     base_url: str,
     start_date: str = "",
@@ -147,12 +153,14 @@ def list_images(
     page: int | str = 1,
     page_size: int | str = 12,
     tags: list[str] | None = None,
+    view_status: str = "all",
     refresh: bool = False,
 ) -> dict[str, object]:
     if refresh:
         config.cleanup_old_images()
         cleanup_image_thumbnails()
     all_tags = load_tags()
+    all_views = load_views()
     selected_tags = [tag for tag in (tags or []) if tag]
     items = [
         {
@@ -160,11 +168,23 @@ def list_images(
             "url": str(item.get("url") or f"{base_url.rstrip('/')}/images/{item['path']}"),
             "thumbnail_url": thumbnail_url(base_url, str(item["path"])),
             "tags": all_tags.get(str(item["path"]), []),
+            "viewed": bool(all_views.get(str(item["path"]))),
+            "viewed_at": all_views.get(str(item["path"])),
         }
         for item in image_storage_service.list_items(base_url, start_date, end_date, refresh=refresh)
     ]
     if selected_tags:
         items = [item for item in items if all(tag in item.get("tags", []) for tag in selected_tags)]
+    view_counts = {
+        "all": len(items),
+        "viewed": sum(1 for item in items if item.get("viewed")),
+        "unviewed": sum(1 for item in items if not item.get("viewed")),
+    }
+    normalized_view_status = _normalize_view_status(view_status)
+    if normalized_view_status == "viewed":
+        items = [item for item in items if item.get("viewed")]
+    elif normalized_view_status == "unviewed":
+        items = [item for item in items if not item.get("viewed")]
     total = len(items)
     normalized_page_size = _normalize_page_size(page_size)
     page_count = max(1, (total + normalized_page_size - 1) // normalized_page_size)
@@ -180,6 +200,7 @@ def list_images(
         "total": total,
         "page": normalized_page,
         "page_size": normalized_page_size,
+        "view_counts": view_counts,
     }
 
 
@@ -189,15 +210,23 @@ def delete_images(
     end_date: str = "",
     all_matching: bool = False,
     tags: list[str] | None = None,
+    view_status: str = "all",
 ) -> dict[str, int]:
     root = config.images_dir.resolve()
     if all_matching:
         all_tags = load_tags()
+        all_views = load_views()
         selected_tags = [tag for tag in (tags or []) if tag]
+        normalized_view_status = _normalize_view_status(view_status)
         targets = []
         for item in image_storage_service.list_items("", start_date=start_date, end_date=end_date):
             rel = str(item["path"])
             if selected_tags and not all(tag in all_tags.get(rel, []) for tag in selected_tags):
+                continue
+            viewed = bool(all_views.get(rel))
+            if normalized_view_status == "viewed" and not viewed:
+                continue
+            if normalized_view_status == "unviewed" and viewed:
                 continue
             targets.append(rel)
     else:
@@ -215,6 +244,7 @@ def delete_images(
             if thumbnail.is_file():
                 thumbnail.unlink()
         remove_tags(item)
+        remove_views([item])
     _cleanup_empty_dirs(root)
     _cleanup_empty_dirs(config.image_thumbnails_dir)
     return {"removed": removed}
