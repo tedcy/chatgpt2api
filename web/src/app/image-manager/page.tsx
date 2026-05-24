@@ -76,6 +76,7 @@ function ImageManagerContent() {
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [isLightboxPaging, setIsLightboxPaging] = useState(false);
   const [page, setPage] = useState(1);
+  const [pageInput, setPageInput] = useState("1");
   const [isLoading, setIsLoading] = useState(true);
   const [deleteTarget, setDeleteTarget] = useState<ManagedImage | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -192,6 +193,22 @@ function ImageManagerContent() {
     }
     void loadLightboxPage(safePage + 1, "first");
   }, [items.length, lightboxIndex, loadLightboxPage, pageCount, safePage]);
+
+  const handleJumpPage = useCallback(() => {
+    const value = pageInput.trim();
+    if (!value) {
+      setPageInput(String(safePage));
+      return;
+    }
+    const parsed = Math.floor(Number(value));
+    if (!Number.isFinite(parsed)) {
+      setPageInput(String(safePage));
+      return;
+    }
+    const nextPage = Math.min(pageCount, Math.max(1, parsed));
+    setPageInput(String(nextPage));
+    setPage(nextPage);
+  }, [pageCount, pageInput, safePage]);
 
   const closeDialog = useCallback(() => {
     setDialogVisible(false);
@@ -342,6 +359,10 @@ function ImageManagerContent() {
     }
     void loadImages();
   }, [page, startDate, endDate, selectedTags.join(",")]);
+
+  useEffect(() => {
+    setPageInput(String(safePage));
+  }, [safePage]);
 
   return (
     <section className="space-y-5">
@@ -602,10 +623,31 @@ function ImageManagerContent() {
           </div>
           <div className="flex items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
             <span>第 {safePage} / {pageCount} 页，共 {totalItems} 张</span>
-            <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
+            <div className="flex items-center gap-1">
+              <Input
+                type="number"
+                inputMode="numeric"
+                min="1"
+                max={pageCount}
+                value={pageInput}
+                onChange={(event) => setPageInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    handleJumpPage();
+                  }
+                }}
+                className="h-9 w-20 rounded-lg px-2 text-center text-sm"
+                aria-label="跳转页码"
+              />
+              <Button variant="outline" className="h-9 rounded-lg border-stone-200 bg-white px-3" disabled={isLoading || !pageInput.trim()} onClick={handleJumpPage}>
+                跳转
+              </Button>
+            </div>
+            <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={isLoading || safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
               <ChevronLeft className="size-4" />
             </Button>
-            <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>
+            <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={isLoading || safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>
               <ChevronRight className="size-4" />
             </Button>
           </div>
@@ -654,6 +696,7 @@ function ImageManagerContent() {
         open={lightboxOpen}
         canGoPrevious={!isLightboxPaging && (lightboxIndex > 0 || safePage > 1)}
         canGoNext={!isLightboxPaging && (lightboxIndex < items.length - 1 || safePage < pageCount)}
+        pageLabel={`第 ${safePage} / ${pageCount} 页`}
         onOpenChange={setLightboxOpen}
         onIndexChange={setLightboxIndex}
         onNavigatePrevious={handleLightboxPrevious}

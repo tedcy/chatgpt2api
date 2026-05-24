@@ -19,6 +19,7 @@ type ImageLightboxProps = {
   open: boolean;
   canGoPrevious?: boolean;
   canGoNext?: boolean;
+  pageLabel?: string;
   onOpenChange: (open: boolean) => void;
   onIndexChange: (index: number) => void;
   onNavigatePrevious?: () => void | Promise<void>;
@@ -110,6 +111,7 @@ export function ImageLightbox({
   open,
   canGoPrevious,
   canGoNext,
+  pageLabel,
   onOpenChange,
   onIndexChange,
   onNavigatePrevious,
@@ -493,6 +495,11 @@ export function ImageLightbox({
                 {currentIndex + 1} / {images.length}
               </span>
             )}
+            {pageLabel ? (
+              <span className="rounded-full bg-black/50 px-3 py-1.5 text-xs font-medium text-white/90">
+                {pageLabel}
+              </span>
+            ) : null}
             <button
               type="button"
               onClick={handleDownload}
